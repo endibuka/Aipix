@@ -1,0 +1,25 @@
+[package]
+name = "aipix"
+version = "0.1.0"
+description = "Modern pixel-art editor with AI-assisted features"
+authors = ["AIPIX Team"]
+license = ""
+repository = "https://github.com/endibuka/Aipix"
+edition = "2021"
+
+[lib]
+name = "aipix_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.1", features = [] }
+tauri-plugin-shell = "2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = "0.25"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-opener = "2.0"

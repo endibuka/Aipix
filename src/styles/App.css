@@ -1,0 +1,15 @@
+/* App-specific styles */
+
+.pixel-canvas {
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+}
+
+.tool-button {
+  @apply p-2 rounded hover:bg-gray-700 transition-colors;
+}
+
+.tool-button.active {
+  @apply bg-blue-600;
+}
