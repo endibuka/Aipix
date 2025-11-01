@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { resetPassword } from "../lib/auth";
 
 interface ForgotPasswordProps {
   onBackToLogin: () => void;
@@ -7,12 +8,30 @@ interface ForgotPasswordProps {
 export const ForgotPassword = ({ onBackToLogin }: ForgotPasswordProps) => {
   const [email, setEmail] = useState("");
   const [isSubmitted, setIsSubmitted] = useState(false);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Password reset logic will be added later
-    console.log("Password reset request for:", email);
-    setIsSubmitted(true);
+    setError("");
+    setLoading(true);
+
+    try {
+      const { error: resetError } = await resetPassword(email);
+
+      if (resetError) {
+        setError(resetError);
+        setLoading(false);
+        return;
+      }
+
+      setIsSubmitted(true);
+    } catch (err: any) {
+      console.error("Password reset error:", err);
+      setError(err.message || "An error occurred");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -69,15 +88,23 @@ export const ForgotPassword = ({ onBackToLogin }: ForgotPasswordProps) => {
                   />
                 </div>
 
+                {/* Error Message */}
+                {error && (
+                  <div className="bg-[#1d1d1d] border border-[#ff6b6b] px-3 py-2 text-[#ff6b6b] text-xs">
+                    {error}
+                  </div>
+                )}
+
                 {/* Submit Button */}
                 <button
                   type="submit"
+                  disabled={loading}
                   className="w-full px-4 py-3 bg-aipix-panel border border-aipix-divider
                            text-aipix-text text-sm uppercase tracking-wider
                            hover:bg-aipix-hover active:bg-aipix-active
-                           transition-colors font-semibold"
+                           transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Send Reset Link
+                  {loading ? "Sending..." : "Send Reset Link"}
                 </button>
 
                 {/* Divider */}

@@ -1,28 +1,49 @@
 import { useState } from "react";
+import { signIn } from "../lib/auth";
+import { invoke } from "@tauri-apps/api/core";
 
 interface LoginProps {
   onCreateAccount: () => void;
   onForgotPassword: () => void;
-  onLoginSuccess: () => void;
+  onLoginSuccess: (userId: string, email: string, username: string) => void;
 }
 
 export const Login = ({ onCreateAccount, onForgotPassword, onLoginSuccess }: LoginProps) => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setLoading(true);
 
-    // Mock authentication
-    if (email === "endibuka@gmail.com" && password === "endibuka123") {
+    try {
+      // Initialize database
+      await invoke("init_database");
+
+      // Authenticate with Supabase
+      const { user, error: authError } = await signIn({ email, password });
+
+      if (authError || !user) {
+        setError(authError || "Failed to sign in");
+        setLoading(false);
+        return;
+      }
+
       // Store user session
       localStorage.setItem("isLoggedIn", "true");
-      localStorage.setItem("userEmail", email);
-      onLoginSuccess();
-    } else {
-      setError("Invalid email or password");
+      localStorage.setItem("userId", user.id);
+      localStorage.setItem("userEmail", user.email);
+      localStorage.setItem("username", user.username);
+
+      onLoginSuccess(user.id, user.email, user.username);
+    } catch (err: any) {
+      console.error("Login error:", err);
+      setError(err.message || "An error occurred during login");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -118,12 +139,13 @@ export const Login = ({ onCreateAccount, onForgotPassword, onLoginSuccess }: Log
             {/* Login Button */}
             <button
               type="submit"
+              disabled={loading}
               className="w-full px-4 py-3 bg-[#2b2b2b] border border-[#1a1a1a]
                        text-[#d6d2ca] text-sm uppercase tracking-wider
                        hover:bg-[#404040] active:bg-[#606060]
-                       transition-colors font-semibold"
+                       transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Login
+              {loading ? "Signing in..." : "Login"}
             </button>
 
             {/* Divider */}
