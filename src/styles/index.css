@@ -3,18 +3,23 @@
 @tailwind utilities;
 
 :root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: 'JetBrains Mono', 'Cascadia Mono', 'Courier New', monospace;
   line-height: 1.5;
   font-weight: 400;
 
   color-scheme: dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #111827;
+  color: #d6d2ca;
+  background-color: #3e323b;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  /* Disable subpixel rendering for pixel-perfect UI */
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
 }
 
 * {
@@ -29,8 +34,20 @@ body {
   place-items: center;
   min-width: 320px;
   min-height: 100vh;
+  background-color: #3e323b;
 }
 
 #root {
   width: 100%;
+}
+
+/* Custom utility classes for pixel-art aesthetic */
+@layer components {
+  .pixel-panel {
+    box-shadow: rgba(0, 0, 0, 0.3) 0 2px 4px;
+  }
+
+  .pixel-text {
+    letter-spacing: 0.05em;
+  }
 }

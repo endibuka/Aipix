@@ -13,3 +13,54 @@
 .tool-button.active {
   @apply bg-blue-600;
 }
+
+/* Pixel-art checkbox */
+.pixel-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  width: 16px;
+  height: 16px;
+  background-color: #1d1d1d;
+  border: 1px solid #1a1a1a;
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.pixel-checkbox:hover {
+  border-color: #8aa7ff;
+}
+
+.pixel-checkbox:focus {
+  outline: none;
+  border-color: #8aa7ff;
+}
+
+/* Pixel-art checkmark using box-shadow technique */
+.pixel-checkbox:checked {
+  background-color: #8aa7ff;
+  border-color: #8aa7ff;
+}
+
+.pixel-checkbox:checked::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 10px;
+  height: 10px;
+  background: transparent;
+  box-shadow:
+    /* Pixel checkmark pattern */
+    2px 0px 0 0 #1d1d1d,
+    2px 1px 0 0 #1d1d1d,
+    1px 2px 0 0 #1d1d1d,
+    1px 3px 0 0 #1d1d1d,
+    0px 2px 0 0 #1d1d1d,
+    0px 1px 0 0 #1d1d1d,
+    -1px 0px 0 0 #1d1d1d,
+    -1px -1px 0 0 #1d1d1d,
+    -2px -2px 0 0 #1d1d1d;
+}
