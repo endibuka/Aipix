@@ -43,40 +43,189 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
   const userEmail = localStorage.getItem("userEmail") || "user@example.com";
   const username = localStorage.getItem("username") || userEmail.split("@")[0];
 
+  // Form state for new project
+  const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectWidth, setNewProjectWidth] = useState(32);
+  const [newProjectHeight, setNewProjectHeight] = useState(32);
+
+  // Form state for new folder
+  const [newFolderName, setNewFolderName] = useState("");
+  const [newFolderColor, setNewFolderColor] = useState("#8aa7ff");
+
+  // Loading states
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false);
+
   // Load projects and folders from database
   useEffect(() => {
-    const loadData = async () => {
-      if (!userId) return;
-
-      try {
-        // Load projects
-        const projectsData: any[] = await invoke("get_user_projects", { userId });
-        setProjects(projectsData.map(p => ({
-          id: p.id,
-          name: p.name,
-          width: p.width,
-          height: p.height,
-          lastModified: p.last_modified,
-          thumbnail: p.thumbnail,
-          folderId: p.folder_id,
-        })));
-
-        // Load folders
-        const foldersData: any[] = await invoke("get_user_folders", { userId });
-        setFolders(foldersData.map(f => ({
-          id: f.id,
-          name: f.name,
-          color: f.color,
-          lastModified: f.updated_at,
-          projectCount: 0, // We'll calculate this
-        })));
-      } catch (error) {
-        console.error("Failed to load data:", error);
-      }
-    };
-
     loadData();
   }, [userId]);
+
+  const loadData = async () => {
+    if (!userId) return;
+
+    try {
+      // Load projects
+      const projectsData: any[] = await invoke("get_user_projects", { userId });
+      setProjects(projectsData.map(p => ({
+        id: p.id,
+        name: p.name,
+        width: p.width,
+        height: p.height,
+        lastModified: p.last_modified,
+        thumbnail: p.thumbnail,
+        folderId: p.folder_id,
+      })));
+
+      // Load folders
+      const foldersData: any[] = await invoke("get_user_folders", { userId });
+      setFolders(foldersData.map(f => ({
+        id: f.id,
+        name: f.name,
+        color: f.color,
+        lastModified: f.updated_at,
+        projectCount: 0, // We'll calculate this
+      })));
+    } catch (error) {
+      console.error("Failed to load data:", error);
+    }
+  };
+
+  // Handle new project submission
+  const handleCreateProject = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!newProjectName.trim()) {
+      alert("Please enter a project name");
+      return;
+    }
+
+    if (newProjectWidth < 1 || newProjectHeight < 1) {
+      alert("Width and height must be at least 1 pixel");
+      return;
+    }
+
+    setIsCreatingProject(true);
+
+    const now = new Date().toISOString();
+    const projectId = crypto.randomUUID();
+
+    // Capture values before resetting
+    const projectName = newProjectName;
+    const projectWidth = newProjectWidth;
+    const projectHeight = newProjectHeight;
+
+    // Optimistic UI: Add to local state immediately
+    const newProject: Project = {
+      id: projectId,
+      name: projectName,
+      width: projectWidth,
+      height: projectHeight,
+      lastModified: now,
+      thumbnail: undefined,
+      folderId: undefined,
+    };
+
+    setProjects(prev => [newProject, ...prev]);
+
+    // Reset form and close modal immediately
+    setNewProjectName("");
+    setNewProjectWidth(32);
+    setNewProjectHeight(32);
+    setShowNewProject(false);
+    setIsCreatingProject(false);
+
+    // Save to database in background - don't await, fire and forget
+    console.log("BEFORE invoke - About to save project to database");
+    const invokePromise = invoke("create_project", {
+      project: {
+        id: projectId,
+        user_id: userId,
+        folder_id: null,
+        name: projectName,
+        width: projectWidth,
+        height: projectHeight,
+        thumbnail: null,
+        created_at: now,
+        updated_at: now,
+        last_modified: now,
+        synced_at: null,
+      },
+    });
+
+    console.log("AFTER invoke - Promise created, attaching handlers");
+
+    invokePromise
+      .then(() => {
+        console.log("SUCCESS - Project saved to database successfully");
+      })
+      .catch((error: any) => {
+        console.error("ERROR - Failed to save project to database:", error);
+        alert(`Failed to save project: ${error}`);
+        // Remove from UI on error
+        setProjects(prev => prev.filter(p => p.id !== projectId));
+      });
+
+    console.log("HANDLERS ATTACHED - Function returning now");
+  };
+
+  // Handle new folder submission
+  const handleCreateFolder = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!newFolderName.trim()) {
+      alert("Please enter a folder name");
+      return;
+    }
+
+    setIsCreatingFolder(true);
+
+    const now = new Date().toISOString();
+    const folderId = crypto.randomUUID();
+
+    // Capture values before resetting
+    const folderName = newFolderName;
+    const folderColor = newFolderColor;
+
+    // Optimistic UI: Add to local state immediately
+    const newFolder: Folder = {
+      id: folderId,
+      name: folderName,
+      color: folderColor,
+      lastModified: now,
+      projectCount: 0,
+    };
+
+    setFolders(prev => [newFolder, ...prev]);
+
+    // Reset form and close modal immediately
+    setNewFolderName("");
+    setNewFolderColor("#8aa7ff");
+    setShowNewFolder(false);
+    setIsCreatingFolder(false);
+
+    // Save to database in background - don't await, fire and forget
+    invoke("create_folder", {
+      folder: {
+        id: folderId,
+        user_id: userId,
+        name: folderName,
+        color: folderColor,
+        created_at: now,
+        updated_at: now,
+        synced_at: null,
+      },
+    })
+      .then(() => {
+        console.log("Folder saved to database successfully");
+      })
+      .catch((error: any) => {
+        console.error("Failed to save folder to database:", error);
+        alert(`Failed to save folder: ${error}`);
+        // Remove from UI on error
+        setFolders(prev => prev.filter(f => f.id !== folderId));
+      });
+  };
 
   const handleContextMenu = (
     e: React.MouseEvent,
@@ -429,16 +578,19 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
             </div>
 
             {/* Modal Content */}
-            <form className="p-6 space-y-4">
+            <form onSubmit={handleCreateProject} className="p-6 space-y-4">
               <div className="space-y-2">
                 <label className="block text-xs text-[#9b978e] uppercase tracking-wide">
                   Project Name
                 </label>
                 <input
                   type="text"
+                  value={newProjectName}
+                  onChange={(e) => setNewProjectName(e.target.value)}
                   className="w-full px-3 py-2 bg-[#1d1d1d] border border-[#1a1a1a]
                            text-[#d6d2ca] text-sm focus:outline-none focus:border-[#8aa7ff]"
                   placeholder="My Pixel Art"
+                  autoFocus
                 />
               </div>
 
@@ -449,7 +601,10 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
                   </label>
                   <input
                     type="number"
-                    defaultValue="32"
+                    value={newProjectWidth}
+                    onChange={(e) => setNewProjectWidth(parseInt(e.target.value) || 32)}
+                    min="1"
+                    max="1024"
                     className="w-full px-3 py-2 bg-[#1d1d1d] border border-[#1a1a1a]
                              text-[#d6d2ca] text-sm focus:outline-none focus:border-[#8aa7ff]"
                   />
@@ -460,7 +615,10 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
                   </label>
                   <input
                     type="number"
-                    defaultValue="32"
+                    value={newProjectHeight}
+                    onChange={(e) => setNewProjectHeight(parseInt(e.target.value) || 32)}
+                    min="1"
+                    max="1024"
                     className="w-full px-3 py-2 bg-[#1d1d1d] border border-[#1a1a1a]
                              text-[#d6d2ca] text-sm focus:outline-none focus:border-[#8aa7ff]"
                   />
@@ -470,17 +628,20 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
               <div className="flex gap-2 pt-4">
                 <button
                   type="submit"
+                  disabled={isCreatingProject}
                   className="flex-1 px-4 py-2 bg-[#8aa7ff] text-[#1d1d1d] text-xs uppercase
-                           hover:bg-[#a0b7ff] transition-colors font-semibold"
+                           hover:bg-[#a0b7ff] transition-colors font-semibold
+                           disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Create
+                  {isCreatingProject ? "Creating..." : "Create"}
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowNewProject(false)}
+                  disabled={isCreatingProject}
                   className="flex-1 px-4 py-2 bg-[#2b2b2b] border border-[#1a1a1a]
                            text-[#d6d2ca] text-xs uppercase hover:bg-[#404040]
-                           transition-colors"
+                           transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Cancel
                 </button>
@@ -508,16 +669,19 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
             </div>
 
             {/* Modal Content */}
-            <form className="p-6 space-y-4">
+            <form onSubmit={handleCreateFolder} className="p-6 space-y-4">
               <div className="space-y-2">
                 <label className="block text-xs text-[#9b978e] uppercase tracking-wide">
                   Folder Name
                 </label>
                 <input
                   type="text"
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
                   className="w-full px-3 py-2 bg-[#1d1d1d] border border-[#1a1a1a]
                            text-[#d6d2ca] text-sm focus:outline-none focus:border-[#8aa7ff]"
                   placeholder="My Assets"
+                  autoFocus
                 />
               </div>
 
@@ -531,8 +695,12 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
                       <button
                         key={color}
                         type="button"
-                        className="w-10 h-10 border-2 border-[#1a1a1a] hover:border-[#d6d2ca]
-                                 transition-colors"
+                        onClick={() => setNewFolderColor(color)}
+                        className={`w-10 h-10 border-2 transition-colors ${
+                          newFolderColor === color
+                            ? "border-[#d6d2ca] scale-110"
+                            : "border-[#1a1a1a] hover:border-[#9b978e]"
+                        }`}
                         style={{ backgroundColor: color }}
                       />
                     )
@@ -543,17 +711,20 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
               <div className="flex gap-2 pt-4">
                 <button
                   type="submit"
+                  disabled={isCreatingFolder}
                   className="flex-1 px-4 py-2 bg-[#8aa7ff] text-[#1d1d1d] text-xs uppercase
-                           hover:bg-[#a0b7ff] transition-colors font-semibold"
+                           hover:bg-[#a0b7ff] transition-colors font-semibold
+                           disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Create
+                  {isCreatingFolder ? "Creating..." : "Create"}
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowNewFolder(false)}
+                  disabled={isCreatingFolder}
                   className="flex-1 px-4 py-2 bg-[#2b2b2b] border border-[#1a1a1a]
                            text-[#d6d2ca] text-xs uppercase hover:bg-[#404040]
-                           transition-colors"
+                           transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Cancel
                 </button>

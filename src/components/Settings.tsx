@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { supabase } from "../lib/supabase";
 
 interface SettingsProps {
   onBack: () => void;
@@ -18,14 +20,67 @@ interface TeamMember {
 export const Settings = ({ onBack }: SettingsProps) => {
   const userId = localStorage.getItem("userId") || "";
   const userEmail = localStorage.getItem("userEmail") || "user@example.com";
-  const username = localStorage.getItem("username") || userEmail.split("@")[0];
+  const storedUsername = localStorage.getItem("username") || userEmail.split("@")[0];
+
   const [activeTab, setActiveTab] = useState<"account" | "team" | "preferences" | "about">("account");
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [pendingInvitations, setPendingInvitations] = useState<any[]>([]);
+  const [username, setUsername] = useState(storedUsername);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const handleSaveProfile = async () => {
+    if (!username.trim()) {
+      alert("Username cannot be empty");
+      return;
+    }
+
+    setIsSaving(true);
+
+    try {
+      const now = new Date().toISOString();
+
+      // Update in local SQLite
+      await invoke("update_user", {
+        user: {
+          id: userId,
+          email: userEmail,
+          username: username,
+          profile_picture: null,
+          created_at: now,
+          updated_at: now,
+        },
+      });
+
+      // Update in Supabase
+      const { error } = await supabase
+        .from("users")
+        .update({
+          username: username,
+          updated_at: now,
+        })
+        .eq("id", userId);
+
+      if (error) {
+        console.error("Failed to update user in Supabase:", error);
+      }
+
+      // Update localStorage
+      localStorage.setItem("username", username);
+
+      alert("Profile updated successfully!");
+    } catch (error: any) {
+      console.error("Failed to update profile:", error);
+      alert(`Failed to update profile: ${error}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   const handleLogout = () => {
     localStorage.removeItem("isLoggedIn");
     localStorage.removeItem("userEmail");
+    localStorage.removeItem("userId");
+    localStorage.removeItem("username");
     window.location.reload();
   };
 
@@ -133,7 +188,8 @@ export const Settings = ({ onBack }: SettingsProps) => {
                     </label>
                     <input
                       type="text"
-                      defaultValue={username}
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value)}
                       className="w-full px-3 py-2 bg-[#1d1d1d] border border-[#1a1a1a]
                                text-[#d6d2ca] text-sm focus:outline-none focus:border-[#8aa7ff]"
                     />
@@ -141,22 +197,28 @@ export const Settings = ({ onBack }: SettingsProps) => {
 
                   <div>
                     <label className="block text-xs text-[#9b978e] uppercase tracking-wide mb-2">
-                      Email
+                      Email (Read-only)
                     </label>
                     <input
                       type="email"
-                      defaultValue={userEmail}
-                      className="w-full px-3 py-2 bg-[#1d1d1d] border border-[#1a1a1a]
-                               text-[#d6d2ca] text-sm focus:outline-none focus:border-[#8aa7ff]"
+                      value={userEmail}
+                      readOnly
+                      disabled
+                      className="w-full px-3 py-2 bg-[#1a1a1a] border border-[#1a1a1a]
+                               text-[#9b978e] text-sm cursor-not-allowed opacity-60"
                     />
+                    <p className="text-xs text-[#9b978e] mt-1">Email cannot be changed</p>
                   </div>
 
                   <div className="pt-4">
                     <button
+                      onClick={handleSaveProfile}
+                      disabled={isSaving}
                       className="px-4 py-2 bg-[#8aa7ff] text-[#1d1d1d] text-xs uppercase
-                               hover:bg-[#a0b7ff] transition-colors font-semibold"
+                               hover:bg-[#a0b7ff] transition-colors font-semibold
+                               disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      Save Changes
+                      {isSaving ? "Saving..." : "Save Changes"}
                     </button>
                   </div>
                 </div>

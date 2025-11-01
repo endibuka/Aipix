@@ -92,6 +92,8 @@ impl Database {
 
     pub fn create_project(&self, project: &Project) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+
+        // Insert project
         conn.execute(
             "INSERT INTO projects (id, user_id, folder_id, name, width, height, thumbnail, created_at, updated_at, last_modified, synced_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -110,8 +112,18 @@ impl Database {
             ],
         )?;
 
-        // Add to sync queue
-        self.add_to_sync_queue("projects", &project.id, "INSERT", &serde_json::to_string(project)?)?;
+        // Add to sync queue - reuse same connection to avoid deadlock
+        conn.execute(
+            "INSERT INTO sync_queue (table_name, record_id, operation, data, created_at, synced)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![
+                "projects",
+                &project.id,
+                "INSERT",
+                &serde_json::to_string(project)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
 
         Ok(())
     }
@@ -161,8 +173,18 @@ impl Database {
             ],
         )?;
 
-        // Add to sync queue
-        self.add_to_sync_queue("projects", &project.id, "UPDATE", &serde_json::to_string(project)?)?;
+        // Add to sync queue - reuse same connection to avoid deadlock
+        conn.execute(
+            "INSERT INTO sync_queue (table_name, record_id, operation, data, created_at, synced)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![
+                "projects",
+                &project.id,
+                "UPDATE",
+                &serde_json::to_string(project)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
 
         Ok(())
     }
@@ -176,8 +198,18 @@ impl Database {
         // Delete project
         conn.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
 
-        // Add to sync queue
-        self.add_to_sync_queue("projects", project_id, "DELETE", "{}")?;
+        // Add to sync queue - reuse same connection to avoid deadlock
+        conn.execute(
+            "INSERT INTO sync_queue (table_name, record_id, operation, data, created_at, synced)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![
+                "projects",
+                project_id,
+                "DELETE",
+                "{}",
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
 
         Ok(())
     }
@@ -200,8 +232,18 @@ impl Database {
             ],
         )?;
 
-        // Add to sync queue
-        self.add_to_sync_queue("folders", &folder.id, "INSERT", &serde_json::to_string(folder)?)?;
+        // Add to sync queue - reuse same connection to avoid deadlock
+        conn.execute(
+            "INSERT INTO sync_queue (table_name, record_id, operation, data, created_at, synced)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![
+                "folders",
+                &folder.id,
+                "INSERT",
+                &serde_json::to_string(folder)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
 
         Ok(())
     }
@@ -242,8 +284,18 @@ impl Database {
             ],
         )?;
 
-        // Add to sync queue
-        self.add_to_sync_queue("folders", &folder.id, "UPDATE", &serde_json::to_string(folder)?)?;
+        // Add to sync queue - reuse same connection to avoid deadlock
+        conn.execute(
+            "INSERT INTO sync_queue (table_name, record_id, operation, data, created_at, synced)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![
+                "folders",
+                &folder.id,
+                "UPDATE",
+                &serde_json::to_string(folder)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
 
         Ok(())
     }
@@ -257,8 +309,18 @@ impl Database {
         // Delete folder
         conn.execute("DELETE FROM folders WHERE id = ?1", params![folder_id])?;
 
-        // Add to sync queue
-        self.add_to_sync_queue("folders", folder_id, "DELETE", "{}")?;
+        // Add to sync queue - reuse same connection to avoid deadlock
+        conn.execute(
+            "INSERT INTO sync_queue (table_name, record_id, operation, data, created_at, synced)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![
+                "folders",
+                folder_id,
+                "DELETE",
+                "{}",
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
 
         Ok(())
     }

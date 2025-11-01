@@ -122,7 +122,7 @@ export async function signIn(credentials: SignInCredentials): Promise<{ user: Au
     // If not in local DB, fetch from Supabase and sync
     if (!user) {
       try {
-        const { data: supabaseUser } = await supabase
+        const { data: supabaseUser, error: fetchError } = await supabase
           .from('users')
           .select('*')
           .eq('id', data.user.id)
@@ -144,9 +144,41 @@ export async function signIn(credentials: SignInCredentials): Promise<{ user: Au
               updated_at: supabaseUser.updated_at,
             },
           });
+        } else if (fetchError) {
+          console.log('User not in Supabase users table, creating now...');
+
+          // User doesn't exist in Supabase users table - create it
+          const newUser = {
+            id: data.user.id,
+            email: data.user.email!,
+            username: data.user.user_metadata?.username || data.user.email!.split('@')[0],
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+
+          const { error: insertError } = await supabase
+            .from('users')
+            .insert(newUser);
+
+          if (insertError) {
+            console.error('Failed to create Supabase user:', insertError);
+          } else {
+            console.log('User created in Supabase successfully');
+          }
+
+          user = {
+            id: newUser.id,
+            email: newUser.email,
+            username: newUser.username,
+          };
+
+          // Create in local SQLite
+          await invoke('create_user', {
+            user: newUser,
+          });
         }
       } catch (e) {
-        console.error('Failed to fetch Supabase user:', e);
+        console.error('Failed to fetch/create Supabase user:', e);
       }
     }
 
