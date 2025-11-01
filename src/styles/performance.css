@@ -1,0 +1,163 @@
+/**
+ * Performance-focused CSS
+ * - Hardware acceleration
+ * - Smooth animations
+ * - Reduced reflows/repaints
+ */
+
+/* Enable hardware acceleration for transforms and opacity */
+.will-change-transform {
+  will-change: transform;
+}
+
+.will-change-opacity {
+  will-change: opacity;
+}
+
+/* Optimize list rendering */
+.optimize-list {
+  contain: layout style paint;
+}
+
+/* Smooth skeleton loading animation */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Optimize hover states - use GPU */
+.pixel-panel {
+  backface-visibility: hidden;
+  transform: translateZ(0);
+  -webkit-font-smoothing: subpixel-antialiased;
+}
+
+/* Reduce paint areas */
+.contain-paint {
+  contain: paint;
+}
+
+.contain-layout {
+  contain: layout;
+}
+
+.contain-strict {
+  contain: strict;
+}
+
+/* Optimize scrolling */
+.smooth-scroll {
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Lazy load images */
+img[loading="lazy"] {
+  content-visibility: auto;
+}
+
+/* Reduce reflows for animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* Optimize grid layouts */
+.grid-optimized {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 1.5rem;
+  contain: layout style;
+}
+
+/* Prevent layout shift */
+.aspect-ratio-box {
+  position: relative;
+  width: 100%;
+}
+
+.aspect-ratio-box::before {
+  content: "";
+  display: block;
+  padding-bottom: 75%; /* 4:3 aspect ratio */
+}
+
+.aspect-ratio-box > * {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Optimize expensive CSS properties */
+.box-shadow-optimized {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  will-change: box-shadow;
+}
+
+/* Critical rendering path optimization */
+.above-fold {
+  content-visibility: visible;
+}
+
+.below-fold {
+  content-visibility: auto;
+  contain-intrinsic-size: 300px;
+}
+
+/* Reduce composite layers */
+.isolate-layer {
+  isolation: isolate;
+}
+
+/* Optimize text rendering */
+.optimize-text {
+  text-rendering: optimizeSpeed;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Prevent font flash */
+@font-face {
+  font-family: 'Jersey 10';
+  font-display: swap;
+}
+
+/* Optimize transitions to use GPU */
+.gpu-transition {
+  transition: transform 0.2s ease, opacity 0.2s ease;
+  will-change: transform, opacity;
+}
+
+/* Virtual scrolling container */
+.virtual-scroll {
+  overflow-y: auto;
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+}
+
+/* Improve paint performance */
+.card-optimized {
+  contain: layout style paint;
+  content-visibility: auto;
+  contain-intrinsic-size: 0 300px;
+}

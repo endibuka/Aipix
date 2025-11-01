@@ -3,6 +3,13 @@ use rusqlite::Connection;
 use anyhow::Result;
 
 pub fn initialize_database(conn: &Connection) -> Result<()> {
+    // Enable SQLite optimizations FIRST (before creating tables)
+    // Use pragma_update for settings that don't return results
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "cache_size", -64000)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+
     // Create users table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS users (
@@ -138,6 +145,22 @@ pub fn initialize_database(conn: &Connection) -> Result<()> {
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sync_queue_synced ON sync_queue(synced)",
+        (),
+    )?;
+
+    // Additional performance indexes
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_projects_last_modified ON projects(last_modified DESC)",
+        (),
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_folders_updated_at ON folders(updated_at DESC)",
+        (),
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_projects_user_folder ON projects(user_id, folder_id)",
         (),
     )?;
 

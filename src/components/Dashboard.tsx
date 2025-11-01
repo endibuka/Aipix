@@ -1,5 +1,7 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback, memo, Suspense, lazy } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ProjectCard } from "./ProjectCard";
+import { FolderCard } from "./FolderCard";
 
 interface Project {
   id: string;
@@ -28,9 +30,22 @@ interface ContextMenu {
 
 interface DashboardProps {
   onOpenSettings: () => void;
+  onOpenProject: (project: { id: string; name: string; width: number; height: number }) => void;
 }
 
-export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
+// Skeleton loading component
+const SkeletonCard = memo(() => (
+  <div className="bg-[#2b2b2b] border border-[#1a1a1a] pixel-panel animate-pulse">
+    <div className="bg-[#4d404f] h-48 border-b border-[#1a1a1a]" />
+    <div className="p-4 space-y-2">
+      <div className="h-4 bg-[#4d404f] rounded w-3/4" />
+      <div className="h-3 bg-[#4d404f] rounded w-1/2" />
+    </div>
+  </div>
+));
+SkeletonCard.displayName = "SkeletonCard";
+
+export const Dashboard = memo(({ onOpenSettings, onOpenProject }: DashboardProps) => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [showNewProject, setShowNewProject] = useState(false);
@@ -38,10 +53,12 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [filterSize, setFilterSize] = useState<string>("all");
+  const [isLoading, setIsLoading] = useState(true);
   const contextMenuRef = useRef<HTMLDivElement>(null);
-  const userId = localStorage.getItem("userId") || "";
-  const userEmail = localStorage.getItem("userEmail") || "user@example.com";
-  const username = localStorage.getItem("username") || userEmail.split("@")[0];
+
+  const userId = useMemo(() => localStorage.getItem("userId") || "", []);
+  const userEmail = useMemo(() => localStorage.getItem("userEmail") || "user@example.com", []);
+  const username = useMemo(() => localStorage.getItem("username") || userEmail.split("@")[0], [userEmail]);
 
   // Form state for new project
   const [newProjectName, setNewProjectName] = useState("");
@@ -56,255 +73,249 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
 
-  // Load projects and folders from database
-  useEffect(() => {
-    loadData();
-  }, [userId]);
+  // Debounced search with useMemo
+  const debouncedSearch = useMemo(() => searchQuery.toLowerCase().trim(), [searchQuery]);
 
-  const loadData = async () => {
+  // Load projects and folders from database
+  const loadData = useCallback(async () => {
     if (!userId) return;
 
+    setIsLoading(true);
     try {
-      // Load projects
-      const projectsData: any[] = await invoke("get_user_projects", { userId });
-      setProjects(projectsData.map(p => ({
-        id: p.id,
-        name: p.name,
-        width: p.width,
-        height: p.height,
-        lastModified: p.last_modified,
-        thumbnail: p.thumbnail,
-        folderId: p.folder_id,
-      })));
+      // Load in parallel for better performance
+      const [projectsData, foldersData] = await Promise.all([
+        invoke("get_user_projects", { userId }) as Promise<any[]>,
+        invoke("get_user_folders", { userId }) as Promise<any[]>,
+      ]);
 
-      // Load folders
-      const foldersData: any[] = await invoke("get_user_folders", { userId });
-      setFolders(foldersData.map(f => ({
-        id: f.id,
-        name: f.name,
-        color: f.color,
-        lastModified: f.updated_at,
-        projectCount: 0, // We'll calculate this
-      })));
+      // Batch state updates
+      requestAnimationFrame(() => {
+        setProjects(
+          projectsData.map((p) => ({
+            id: p.id,
+            name: p.name,
+            width: p.width,
+            height: p.height,
+            lastModified: p.last_modified,
+            thumbnail: p.thumbnail,
+            folderId: p.folder_id,
+          }))
+        );
+
+        setFolders(
+          foldersData.map((f) => ({
+            id: f.id,
+            name: f.name,
+            color: f.color,
+            lastModified: f.updated_at,
+            projectCount: 0, // Calculate this
+          }))
+        );
+
+        setIsLoading(false);
+      });
     } catch (error) {
       console.error("Failed to load data:", error);
+      setIsLoading(false);
     }
-  };
+  }, [userId]);
 
-  // Handle new project submission
-  const handleCreateProject = async (e: React.FormEvent) => {
-    e.preventDefault();
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
-    if (!newProjectName.trim()) {
-      alert("Please enter a project name");
-      return;
-    }
+  // Memoized filtered data
+  const filteredData = useMemo(() => {
+    const filteredFolders = folders.filter((folder) =>
+      folder.name.toLowerCase().includes(debouncedSearch)
+    );
 
-    if (newProjectWidth < 1 || newProjectHeight < 1) {
-      alert("Width and height must be at least 1 pixel");
-      return;
-    }
+    const filteredProjects = projects.filter((project) => {
+      const matchesSearch = project.name.toLowerCase().includes(debouncedSearch);
 
-    setIsCreatingProject(true);
+      let matchesSize = true;
+      if (filterSize !== "all") {
+        const size = project.width * project.height;
+        switch (filterSize) {
+          case "small":
+            matchesSize = size <= 1024;
+            break;
+          case "medium":
+            matchesSize = size > 1024 && size <= 16384;
+            break;
+          case "large":
+            matchesSize = size > 16384;
+            break;
+        }
+      }
 
-    const now = new Date().toISOString();
-    const projectId = crypto.randomUUID();
+      return matchesSearch && matchesSize;
+    });
 
-    // Capture values before resetting
-    const projectName = newProjectName;
-    const projectWidth = newProjectWidth;
-    const projectHeight = newProjectHeight;
+    return { filteredFolders, filteredProjects };
+  }, [folders, projects, debouncedSearch, filterSize]);
 
-    // Optimistic UI: Add to local state immediately
-    const newProject: Project = {
-      id: projectId,
-      name: projectName,
-      width: projectWidth,
-      height: projectHeight,
-      lastModified: now,
-      thumbnail: undefined,
-      folderId: undefined,
-    };
+  // Optimistic UI project creation
+  const handleCreateProject = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
 
-    setProjects(prev => [newProject, ...prev]);
+      if (!newProjectName.trim()) {
+        alert("Please enter a project name");
+        return;
+      }
 
-    // Reset form and close modal immediately
-    setNewProjectName("");
-    setNewProjectWidth(32);
-    setNewProjectHeight(32);
-    setShowNewProject(false);
-    setIsCreatingProject(false);
+      if (newProjectWidth < 1 || newProjectHeight < 1) {
+        alert("Width and height must be at least 1 pixel");
+        return;
+      }
 
-    // Save to database in background - don't await, fire and forget
-    console.log("BEFORE invoke - About to save project to database");
-    const invokePromise = invoke("create_project", {
-      project: {
+      setIsCreatingProject(true);
+
+      const now = new Date().toISOString();
+      const projectId = crypto.randomUUID();
+      const projectName = newProjectName;
+      const projectWidth = newProjectWidth;
+      const projectHeight = newProjectHeight;
+
+      // Optimistic UI update
+      const newProject: Project = {
         id: projectId,
-        user_id: userId,
-        folder_id: null,
         name: projectName,
         width: projectWidth,
         height: projectHeight,
-        thumbnail: null,
-        created_at: now,
-        updated_at: now,
-        last_modified: now,
-        synced_at: null,
-      },
-    });
+        lastModified: now,
+        thumbnail: undefined,
+        folderId: undefined,
+      };
 
-    console.log("AFTER invoke - Promise created, attaching handlers");
+      setProjects((prev) => [newProject, ...prev]);
 
-    invokePromise
-      .then(() => {
-        console.log("SUCCESS - Project saved to database successfully");
-      })
-      .catch((error: any) => {
-        console.error("ERROR - Failed to save project to database:", error);
+      // Reset form immediately
+      setNewProjectName("");
+      setNewProjectWidth(32);
+      setNewProjectHeight(32);
+      setShowNewProject(false);
+      setIsCreatingProject(false);
+
+      // Background save
+      invoke("create_project", {
+        project: {
+          id: projectId,
+          user_id: userId,
+          folder_id: null,
+          name: projectName,
+          width: projectWidth,
+          height: projectHeight,
+          thumbnail: null,
+          created_at: now,
+          updated_at: now,
+          last_modified: now,
+          synced_at: null,
+        },
+      }).catch((error: any) => {
+        console.error("Failed to save project:", error);
         alert(`Failed to save project: ${error}`);
-        // Remove from UI on error
-        setProjects(prev => prev.filter(p => p.id !== projectId));
+        setProjects((prev) => prev.filter((p) => p.id !== projectId));
       });
-
-    console.log("HANDLERS ATTACHED - Function returning now");
-  };
-
-  // Handle new folder submission
-  const handleCreateFolder = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!newFolderName.trim()) {
-      alert("Please enter a folder name");
-      return;
-    }
-
-    setIsCreatingFolder(true);
-
-    const now = new Date().toISOString();
-    const folderId = crypto.randomUUID();
-
-    // Capture values before resetting
-    const folderName = newFolderName;
-    const folderColor = newFolderColor;
-
-    // Optimistic UI: Add to local state immediately
-    const newFolder: Folder = {
-      id: folderId,
-      name: folderName,
-      color: folderColor,
-      lastModified: now,
-      projectCount: 0,
-    };
-
-    setFolders(prev => [newFolder, ...prev]);
-
-    // Reset form and close modal immediately
-    setNewFolderName("");
-    setNewFolderColor("#8aa7ff");
-    setShowNewFolder(false);
-    setIsCreatingFolder(false);
-
-    // Save to database in background - don't await, fire and forget
-    invoke("create_folder", {
-      folder: {
-        id: folderId,
-        user_id: userId,
-        name: folderName,
-        color: folderColor,
-        created_at: now,
-        updated_at: now,
-        synced_at: null,
-      },
-    })
-      .then(() => {
-        console.log("Folder saved to database successfully");
-      })
-      .catch((error: any) => {
-        console.error("Failed to save folder to database:", error);
-        alert(`Failed to save folder: ${error}`);
-        // Remove from UI on error
-        setFolders(prev => prev.filter(f => f.id !== folderId));
-      });
-  };
-
-  const handleContextMenu = (
-    e: React.MouseEvent,
-    itemId: string,
-    itemType: "project" | "folder"
-  ) => {
-    e.preventDefault();
-    setContextMenu({
-      itemId,
-      itemType,
-      x: e.clientX,
-      y: e.clientY,
-    });
-  };
-
-  const handleContextMenuAction = (
-    action: string,
-    itemId: string,
-    itemType: "project" | "folder"
-  ) => {
-    console.log(`Action: ${action}, ${itemType}: ${itemId}`);
-    setContextMenu(null);
-
-    // Handle different actions
-    switch (action) {
-      case "open":
-        console.log(`Opening ${itemType}:`, itemId);
-        break;
-      case "rename":
-        console.log(`Renaming ${itemType}:`, itemId);
-        break;
-      case "duplicate":
-        if (itemType === "project") {
-          console.log("Duplicating project:", itemId);
-        }
-        break;
-      case "delete":
-        const confirmMessage =
-          itemType === "folder"
-            ? "Are you sure you want to delete this folder and all its contents?"
-            : "Are you sure you want to delete this project?";
-        if (confirm(confirmMessage)) {
-          console.log(`Deleting ${itemType}:`, itemId);
-        }
-        break;
-    }
-  };
-
-  // Filter and search folders
-  const filteredFolders = folders.filter((folder) =>
-    folder.name.toLowerCase().includes(searchQuery.toLowerCase())
+    },
+    [newProjectName, newProjectWidth, newProjectHeight, userId]
   );
 
-  // Filter and search projects
-  const filteredProjects = projects.filter((project) => {
-    // Search filter
-    const matchesSearch = project.name
-      .toLowerCase()
-      .includes(searchQuery.toLowerCase());
+  // Optimistic UI folder creation
+  const handleCreateFolder = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
 
-    // Size filter
-    let matchesSize = true;
-    if (filterSize !== "all") {
-      const size = project.width * project.height;
-      switch (filterSize) {
-        case "small": // <= 32x32
-          matchesSize = size <= 1024;
+      if (!newFolderName.trim()) {
+        alert("Please enter a folder name");
+        return;
+      }
+
+      setIsCreatingFolder(true);
+
+      const now = new Date().toISOString();
+      const folderId = crypto.randomUUID();
+      const folderName = newFolderName;
+      const folderColor = newFolderColor;
+
+      const newFolder: Folder = {
+        id: folderId,
+        name: folderName,
+        color: folderColor,
+        lastModified: now,
+        projectCount: 0,
+      };
+
+      setFolders((prev) => [newFolder, ...prev]);
+
+      setNewFolderName("");
+      setNewFolderColor("#8aa7ff");
+      setShowNewFolder(false);
+      setIsCreatingFolder(false);
+
+      invoke("create_folder", {
+        folder: {
+          id: folderId,
+          user_id: userId,
+          name: folderName,
+          color: folderColor,
+          created_at: now,
+          updated_at: now,
+          synced_at: null,
+        },
+      }).catch((error: any) => {
+        console.error("Failed to save folder:", error);
+        alert(`Failed to save folder: ${error}`);
+        setFolders((prev) => prev.filter((f) => f.id !== folderId));
+      });
+    },
+    [newFolderName, newFolderColor, userId]
+  );
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent, itemId: string, itemType: "project" | "folder") => {
+      e.preventDefault();
+      setContextMenu({
+        itemId,
+        itemType,
+        x: e.clientX,
+        y: e.clientY,
+      });
+    },
+    []
+  );
+
+  const handleContextMenuAction = useCallback(
+    (action: string, itemId: string, itemType: "project" | "folder") => {
+      console.log(`Action: ${action}, ${itemType}: ${itemId}`);
+      setContextMenu(null);
+
+      switch (action) {
+        case "open":
+          console.log(`Opening ${itemType}:`, itemId);
           break;
-        case "medium": // 33x33 to 128x128
-          matchesSize = size > 1024 && size <= 16384;
+        case "rename":
+          console.log(`Renaming ${itemType}:`, itemId);
           break;
-        case "large": // > 128x128
-          matchesSize = size > 16384;
+        case "duplicate":
+          if (itemType === "project") {
+            console.log("Duplicating project:", itemId);
+          }
+          break;
+        case "delete":
+          const confirmMessage =
+            itemType === "folder"
+              ? "Are you sure you want to delete this folder and all its contents?"
+              : "Are you sure you want to delete this project?";
+          if (confirm(confirmMessage)) {
+            console.log(`Deleting ${itemType}:`, itemId);
+          }
           break;
       }
-    }
-
-    return matchesSearch && matchesSize;
-  });
+    },
+    []
+  );
 
   // Close context menu on click outside
   useEffect(() => {
@@ -320,10 +331,34 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
     }
   }, [contextMenu]);
 
+  // Memoized card renderers
+  const renderProjectCard = useCallback(
+    (project: Project) => (
+      <ProjectCard
+        key={project.id}
+        project={project}
+        onClick={() => onOpenProject(project)}
+        onContextMenu={(e) => handleContextMenu(e, project.id, "project")}
+      />
+    ),
+    [onOpenProject, handleContextMenu]
+  );
+
+  const renderFolderCard = useCallback(
+    (folder: Folder) => (
+      <FolderCard
+        key={folder.id}
+        folder={folder}
+        onContextMenu={(e) => handleContextMenu(e, folder.id, "folder")}
+      />
+    ),
+    [handleContextMenu]
+  );
+
   return (
     <div className="min-h-screen bg-[#3e323b] font-mono">
-      {/* Header */}
-      <div className="bg-[#2b2b2b] border-b border-[#1a1a1a] px-6 py-4">
+      {/* Header - Optimized with will-change */}
+      <div className="bg-[#2b2b2b] border-b border-[#1a1a1a] px-6 py-4 will-change-transform">
         <div className="container mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-[#4d404f] border-2 border-[#8aa7ff] flex items-center justify-center">
@@ -349,7 +384,6 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
 
       {/* Main Content */}
       <div className="container mx-auto px-6 py-8">
-
         {/* Projects Section */}
         <div>
           {/* Section Header */}
@@ -377,7 +411,6 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
 
           {/* Search and Filter Bar */}
           <div className="flex gap-4 mb-6">
-            {/* Search Input */}
             <div className="flex-1">
               <input
                 type="text"
@@ -390,19 +423,13 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
               />
             </div>
 
-            {/* Filter Dropdown */}
             <div className="w-48">
               <select
                 value={filterSize}
                 onChange={(e) => setFilterSize(e.target.value)}
                 className="w-full px-3 py-2 bg-[#1d1d1d] border border-[#1a1a1a]
                          text-[#d6d2ca] text-sm focus:outline-none focus:border-[#8aa7ff]
-                         transition-colors cursor-pointer appearance-none bg-no-repeat bg-right
-                         pr-8"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239b978e' d='M6 8L2 4h8z'/%3E%3C/svg%3E")`,
-                  backgroundPosition: 'right 0.75rem center',
-                }}
+                         transition-colors cursor-pointer"
               >
                 <option value="all">All Sizes</option>
                 <option value="small">Small (≤32x32)</option>
@@ -412,159 +439,61 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
             </div>
           </div>
 
-          {/* Projects Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {/* Folder Cards */}
-            {filteredFolders.map((folder) => (
-              <div
-                key={folder.id}
-                onContextMenu={(e) => handleContextMenu(e, folder.id, "folder")}
-                className="bg-[#2b2b2b] border border-[#1a1a1a] hover:border-[#8aa7ff]
-                         transition-colors cursor-pointer pixel-panel group"
-              >
-                {/* Folder Icon Area */}
-                <div className="bg-[#4d404f] h-48 flex items-center justify-center border-b border-[#1a1a1a]">
-                  <div className="text-center">
-                    <div
-                      className="w-20 h-16 mx-auto mb-2 relative"
-                      style={{ color: folder.color || "#8aa7ff" }}
-                    >
-                      {/* Folder Icon */}
-                      <svg
-                        viewBox="0 0 80 64"
-                        fill="currentColor"
-                        className="w-full h-full"
-                      >
-                        {/* Folder tab */}
-                        <rect x="0" y="8" width="32" height="8" />
-                        {/* Main folder body */}
-                        <rect x="0" y="16" width="80" height="48" />
-                        {/* Inner shadow effect */}
-                        <rect
-                          x="4"
-                          y="20"
-                          width="72"
-                          height="40"
-                          fill="#2b2b2b"
-                          opacity="0.3"
-                        />
-                      </svg>
-                    </div>
-                    <p className="text-xs text-[#9b978e]">
-                      {folder.projectCount} project
-                      {folder.projectCount !== 1 ? "s" : ""}
-                    </p>
+          {/* Projects Grid with loading state */}
+          {isLoading ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {[...Array(6)].map((_, i) => (
+                <SkeletonCard key={i} />
+              ))}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {filteredData.filteredFolders.map(renderFolderCard)}
+              {filteredData.filteredProjects.map(renderProjectCard)}
+
+              {/* Empty State */}
+              {filteredData.filteredProjects.length === 0 &&
+                filteredData.filteredFolders.length === 0 && (
+                  <div className="col-span-full text-center py-16">
+                    {projects.length === 0 && folders.length === 0 ? (
+                      <>
+                        <p className="text-[#9b978e] mb-4">No projects yet</p>
+                        <button
+                          onClick={() => setShowNewProject(true)}
+                          className="px-4 py-2 bg-[#2b2b2b] border border-[#1a1a1a]
+                                   text-[#d6d2ca] text-xs uppercase hover:bg-[#404040]
+                                   transition-colors"
+                        >
+                          Create Your First Project
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-[#9b978e] mb-2">No projects match your search</p>
+                        <button
+                          onClick={() => {
+                            setSearchQuery("");
+                            setFilterSize("all");
+                          }}
+                          className="px-4 py-2 bg-[#2b2b2b] border border-[#1a1a1a]
+                                   text-[#d6d2ca] text-xs uppercase hover:bg-[#404040]
+                                   transition-colors"
+                        >
+                          Clear Filters
+                        </button>
+                      </>
+                    )}
                   </div>
-                </div>
-
-                {/* Folder Info */}
-                <div className="p-4">
-                  <h4 className="text-sm font-semibold text-[#d6d2ca] mb-1 group-hover:text-[#8aa7ff] transition-colors">
-                    📁 {folder.name}
-                  </h4>
-                  <p className="text-xs text-[#9b978e]">
-                    Modified: {folder.lastModified}
-                  </p>
-                </div>
-              </div>
-            ))}
-
-            {/* Project Cards */}
-            {filteredProjects.map((project) => (
-              <div
-                key={project.id}
-                onContextMenu={(e) => handleContextMenu(e, project.id, "project")}
-                className="bg-[#2b2b2b] border border-[#1a1a1a] hover:border-[#8aa7ff]
-                         transition-colors cursor-pointer pixel-panel group"
-              >
-                {/* Thumbnail Area */}
-                <div className="bg-[#4d404f] h-48 flex items-center justify-center border-b border-[#1a1a1a]">
-                  <div className="text-center">
-                    <div
-                      className="w-20 h-16 mx-auto mb-2 relative"
-                      style={{ color: "#8aa7ff" }}
-                    >
-                      {/* Folder Icon */}
-                      <svg
-                        viewBox="0 0 80 64"
-                        fill="currentColor"
-                        className="w-full h-full"
-                      >
-                        {/* Folder tab */}
-                        <rect x="0" y="8" width="32" height="8" />
-                        {/* Main folder body */}
-                        <rect x="0" y="16" width="80" height="48" />
-                        {/* Inner shadow effect */}
-                        <rect
-                          x="4"
-                          y="20"
-                          width="72"
-                          height="40"
-                          fill="#2b2b2b"
-                          opacity="0.3"
-                        />
-                      </svg>
-                    </div>
-                    <p className="text-xs text-[#9b978e]">
-                      {project.width}x{project.height}px
-                    </p>
-                  </div>
-                </div>
-
-                {/* Project Info */}
-                <div className="p-4">
-                  <h4 className="text-sm font-semibold text-[#d6d2ca] mb-1 group-hover:text-[#8aa7ff] transition-colors">
-                    {project.name}
-                  </h4>
-                  <p className="text-xs text-[#9b978e]">
-                    Modified: {project.lastModified}
-                  </p>
-                </div>
-              </div>
-            ))}
-
-            {/* Empty State */}
-            {filteredProjects.length === 0 && filteredFolders.length === 0 && (
-              <div className="col-span-full text-center py-16">
-                {projects.length === 0 && folders.length === 0 ? (
-                  <>
-                    <p className="text-[#9b978e] mb-4">No projects yet</p>
-                    <button
-                      onClick={() => setShowNewProject(true)}
-                      className="px-4 py-2 bg-[#2b2b2b] border border-[#1a1a1a]
-                               text-[#d6d2ca] text-xs uppercase hover:bg-[#404040]
-                               transition-colors"
-                    >
-                      Create Your First Project
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <p className="text-[#9b978e] mb-2">No projects match your search</p>
-                    <button
-                      onClick={() => {
-                        setSearchQuery("");
-                        setFilterSize("all");
-                      }}
-                      className="px-4 py-2 bg-[#2b2b2b] border border-[#1a1a1a]
-                               text-[#d6d2ca] text-xs uppercase hover:bg-[#404040]
-                               transition-colors"
-                    >
-                      Clear Filters
-                    </button>
-                  </>
                 )}
-              </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* New Project Modal */}
+      {/* Modals and Context Menu - Render only when needed */}
       {showNewProject && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-[#2b2b2b] border border-[#1a1a1a] max-w-md w-full pixel-panel">
-            {/* Modal Header */}
             <div className="bg-[#404040] border-b border-[#1a1a1a] px-4 py-3 flex justify-between items-center">
               <h3 className="text-[#d6d2ca] text-sm uppercase tracking-wider">
                 New Project
@@ -577,7 +506,6 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
               </button>
             </div>
 
-            {/* Modal Content */}
             <form onSubmit={handleCreateProject} className="p-6 space-y-4">
               <div className="space-y-2">
                 <label className="block text-xs text-[#9b978e] uppercase tracking-wide">
@@ -651,11 +579,9 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
         </div>
       )}
 
-      {/* New Folder Modal */}
       {showNewFolder && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-[#2b2b2b] border border-[#1a1a1a] max-w-md w-full pixel-panel">
-            {/* Modal Header */}
             <div className="bg-[#404040] border-b border-[#1a1a1a] px-4 py-3 flex justify-between items-center">
               <h3 className="text-[#d6d2ca] text-sm uppercase tracking-wider">
                 New Folder
@@ -668,7 +594,6 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
               </button>
             </div>
 
-            {/* Modal Content */}
             <form onSubmit={handleCreateFolder} className="p-6 space-y-4">
               <div className="space-y-2">
                 <label className="block text-xs text-[#9b978e] uppercase tracking-wide">
@@ -690,21 +615,19 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
                   Folder Color
                 </label>
                 <div className="flex gap-2">
-                  {["#8aa7ff", "#ff6b6b", "#4ecdc4", "#ffe66d", "#a8e6cf"].map(
-                    (color) => (
-                      <button
-                        key={color}
-                        type="button"
-                        onClick={() => setNewFolderColor(color)}
-                        className={`w-10 h-10 border-2 transition-colors ${
-                          newFolderColor === color
-                            ? "border-[#d6d2ca] scale-110"
-                            : "border-[#1a1a1a] hover:border-[#9b978e]"
-                        }`}
-                        style={{ backgroundColor: color }}
-                      />
-                    )
-                  )}
+                  {["#8aa7ff", "#ff6b6b", "#4ecdc4", "#ffe66d", "#a8e6cf"].map((color) => (
+                    <button
+                      key={color}
+                      type="button"
+                      onClick={() => setNewFolderColor(color)}
+                      className={`w-10 h-10 border-2 transition-colors ${
+                        newFolderColor === color
+                          ? "border-[#d6d2ca] scale-110"
+                          : "border-[#1a1a1a] hover:border-[#9b978e]"
+                      }`}
+                      style={{ backgroundColor: color }}
+                    />
+                  ))}
                 </div>
               </div>
 
@@ -734,7 +657,6 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
         </div>
       )}
 
-      {/* Context Menu */}
       {contextMenu && (
         <div
           ref={contextMenuRef}
@@ -747,25 +669,17 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
           <div className="py-1 min-w-[160px]">
             <button
               onClick={() =>
-                handleContextMenuAction(
-                  "open",
-                  contextMenu.itemId,
-                  contextMenu.itemType
-                )
+                handleContextMenuAction("open", contextMenu.itemId, contextMenu.itemType)
               }
               className="w-full px-4 py-2 text-left text-xs text-[#d6d2ca] hover:bg-[#404040]
                        transition-colors uppercase tracking-wide"
             >
               Open
             </button>
-            <div className="border-t border-[#1a1a1a] my-1"></div>
+            <div className="border-t border-[#1a1a1a] my-1" />
             <button
               onClick={() =>
-                handleContextMenuAction(
-                  "rename",
-                  contextMenu.itemId,
-                  contextMenu.itemType
-                )
+                handleContextMenuAction("rename", contextMenu.itemId, contextMenu.itemType)
               }
               className="w-full px-4 py-2 text-left text-xs text-[#d6d2ca] hover:bg-[#404040]
                        transition-colors uppercase tracking-wide"
@@ -775,11 +689,7 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
             {contextMenu.itemType === "project" && (
               <button
                 onClick={() =>
-                  handleContextMenuAction(
-                    "duplicate",
-                    contextMenu.itemId,
-                    contextMenu.itemType
-                  )
+                  handleContextMenuAction("duplicate", contextMenu.itemId, contextMenu.itemType)
                 }
                 className="w-full px-4 py-2 text-left text-xs text-[#d6d2ca] hover:bg-[#404040]
                          transition-colors uppercase tracking-wide"
@@ -787,14 +697,10 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
                 Duplicate
               </button>
             )}
-            <div className="border-t border-[#1a1a1a] my-1"></div>
+            <div className="border-t border-[#1a1a1a] my-1" />
             <button
               onClick={() =>
-                handleContextMenuAction(
-                  "delete",
-                  contextMenu.itemId,
-                  contextMenu.itemType
-                )
+                handleContextMenuAction("delete", contextMenu.itemId, contextMenu.itemType)
               }
               className="w-full px-4 py-2 text-left text-xs text-[#ff6b6b] hover:bg-[#404040]
                        transition-colors uppercase tracking-wide"
@@ -806,4 +712,6 @@ export const Dashboard = ({ onOpenSettings }: DashboardProps) => {
       )}
     </div>
   );
-};
+});
+
+Dashboard.displayName = "Dashboard";

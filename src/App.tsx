@@ -5,17 +5,27 @@ import { CreateAccount } from "./components/CreateAccount";
 import { ForgotPassword } from "./components/ForgotPassword";
 import { Dashboard } from "./components/Dashboard";
 import { Settings } from "./components/Settings";
+import { Canvas } from "./components/Canvas";
 import { setupAutoSync, pushToCloud } from "./lib/sync";
 import "./styles/App.css";
+import "./styles/performance.css";
 
 type AuthPage = "login" | "createAccount" | "forgotPassword";
-type AppPage = "dashboard" | "settings";
+type AppPage = "dashboard" | "settings" | "canvas";
+
+interface CanvasProject {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+}
 
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [currentAuthPage, setCurrentAuthPage] = useState<AuthPage>("login");
   const [currentPage, setCurrentPage] = useState<AppPage>("dashboard");
   const [dbInitialized, setDbInitialized] = useState(false);
+  const [canvasProject, setCanvasProject] = useState<CanvasProject | null>(null);
 
   // Check for existing session on mount and initialize database
   useEffect(() => {
@@ -93,12 +103,35 @@ function App() {
     }
   }
 
-  // Main app view - Dashboard or Settings
+  // Main app view - Dashboard, Settings, or Canvas
+  if (currentPage === "canvas" && canvasProject) {
+    return (
+      <Canvas
+        projectId={canvasProject.id}
+        projectName={canvasProject.name}
+        width={canvasProject.width}
+        height={canvasProject.height}
+        onBack={() => {
+          setCurrentPage("dashboard");
+          setCanvasProject(null);
+        }}
+      />
+    );
+  }
+
   if (currentPage === "settings") {
     return <Settings onBack={() => setCurrentPage("dashboard")} />;
   }
 
-  return <Dashboard onOpenSettings={() => setCurrentPage("settings")} />;
+  return (
+    <Dashboard
+      onOpenSettings={() => setCurrentPage("settings")}
+      onOpenProject={(project) => {
+        setCanvasProject(project);
+        setCurrentPage("canvas");
+      }}
+    />
+  );
 }
 
 export default App;

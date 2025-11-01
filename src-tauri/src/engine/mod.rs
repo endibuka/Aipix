@@ -4,7 +4,10 @@
 pub mod pixel_buffer;
 pub mod layer;
 pub mod animation;
+pub mod tools;
+pub mod history;
 
 pub use pixel_buffer::PixelBuffer;
 pub use layer::Layer;
 pub use animation::Frame;
+pub use history::CanvasHistory;
