@@ -59,6 +59,95 @@ src/
 ## 🚀 Getting Started
 
 ### Prerequisites
-- [Rust](https://www.rust-lang.org/tools/install)
-- [Node.js](https://nodejs.org/)
-- [Tauri CLI](https://tauri.app/v1/guides/getting-started/prerequisites/)
+- [Rust](https://www.rust-lang.org/tools/install) (v1.90.0 or higher)
+- [Node.js](https://nodejs.org/) (v22.14.0 or higher)
+- [npm](https://www.npmjs.com/) (v10.9.2 or higher)
+
+### Installation
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/endibuka/Aipix.git
+   cd Aipix
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Run the development server:**
+   ```bash
+   npm run tauri:dev
+   ```
+
+   This will start both the Vite development server and the Tauri application window.
+
+### Available Scripts
+
+- `npm run dev` - Start Vite development server only (frontend)
+- `npm run build` - Build the frontend for production
+- `npm run preview` - Preview the production build
+- `npm run tauri:dev` - Start Tauri application in development mode
+- `npm run tauri:build` - Build the Tauri application for production
+- `npm run lint` - Run ESLint to check code quality
+- `npm run format` - Format code with Prettier
+
+### Project Structure
+
+```
+Aipix/
+├── src/                          # Frontend source code
+│   ├── components/               # React components
+│   │   └── Toolbar.tsx          # Drawing tools toolbar
+│   ├── canvas/                   # Canvas rendering
+│   │   └── PixelCanvas.tsx      # Main pixel canvas component
+│   ├── state/                    # State management
+│   │   └── store.ts             # Zustand global store
+│   ├── hooks/                    # Custom React hooks
+│   │   └── useCanvas.ts         # Canvas utilities hook
+│   ├── styles/                   # CSS and styling
+│   │   ├── index.css            # Global styles
+│   │   └── App.css              # App-specific styles
+│   ├── App.tsx                  # Main app component
+│   └── main.tsx                 # React entry point
+│
+├── src-tauri/                    # Rust backend
+│   ├── src/
+│   │   ├── main.rs              # Tauri application entry
+│   │   ├── lib.rs               # Library exports
+│   │   ├── engine/              # Pixel art engine
+│   │   │   ├── mod.rs           # Engine module exports
+│   │   │   ├── pixel_buffer.rs  # Pixel buffer implementation
+│   │   │   ├── layer.rs         # Layer management
+│   │   │   └── animation.rs     # Frame/animation system
+│   │   └── fileio/              # File I/O operations
+│   │       └── mod.rs           # Image load/save
+│   ├── icons/                   # Application icons
+│   ├── Cargo.toml               # Rust dependencies
+│   ├── tauri.conf.json          # Tauri configuration
+│   └── build.rs                 # Build script
+│
+├── package.json                  # Node.js dependencies
+├── tsconfig.json                 # TypeScript configuration
+├── vite.config.ts                # Vite build configuration
+├── tailwind.config.js            # TailwindCSS configuration
+├── eslint.config.js              # ESLint configuration
+└── README.md                     # This file
+```
+
+### Development Workflow
+
+1. **Making Changes:**
+   - Frontend changes in `src/` will hot-reload automatically
+   - Rust backend changes in `src-tauri/src/` require restarting the dev server
+
+2. **Adding Dependencies:**
+   - Frontend: `npm install <package-name>`
+   - Backend: Add to `src-tauri/Cargo.toml` and run `cargo build`
+
+3. **Building for Production:**
+   ```bash
+   npm run tauri:build
+   ```
+   This creates platform-specific installers in `src-tauri/target/release/bundle/`
