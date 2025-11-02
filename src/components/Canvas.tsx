@@ -125,6 +125,8 @@ export const Canvas = ({
   const drawBatchRef = useRef<Array<{ x: number; y: number }>>([]);
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
   const isDrawingRef = useRef(false);
+  const flushTimerRef = useRef<number | null>(null);
+  const lastFlushTimeRef = useRef<number>(0);
 
   // Default color palette (Aseprite-like) - now dynamic
   const [colorPalette, setColorPalette] = useState([
@@ -309,6 +311,9 @@ export const Canvas = ({
     return () => {
       webglRendererRef.current?.dispose();
       rafProcessorRef.current?.clear();
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+      }
     };
   }, [projectId, width, height]);
 
@@ -652,6 +657,18 @@ export const Canvas = ({
       drawHoverPreview(x, y);
     }
 
+    // Safety check: Verify mouse button is actually pressed
+    // e.buttons === 0 means no buttons pressed, === 1 means left button
+    if (isDrawing && e.buttons !== 1) {
+      console.log("Mouse button released outside canvas, stopping drawing");
+      setIsDrawing(false);
+      isDrawingRef.current = false;
+      if (selectedTool === "pencil" || selectedTool === "eraser" || selectedTool === "colorReplace") {
+        await flushDrawBatch();
+      }
+      return;
+    }
+
     if (!isDrawing) return;
 
     if (selectedTool === "line" || selectedTool === "rectangle" || selectedTool === "circle") {
@@ -791,24 +808,26 @@ export const Canvas = ({
     const ctx = layerCanvas.getContext("2d");
     if (!ctx) return;
 
-    // Helper function to draw a single pixel or brush stroke
+    // Helper function to draw a single pixel or brush stroke (optimized)
     const drawBrush = (centerX: number, centerY: number) => {
-      // Draw brush size (centered on cursor)
       const offset = Math.floor(brushSize / 2);
-      for (let dy = 0; dy < brushSize; dy++) {
-        for (let dx = 0; dx < brushSize; dx++) {
-          const px = centerX - offset + dx;
-          const py = centerY - offset + dy;
+      const startX = Math.max(0, centerX - offset);
+      const startY = Math.max(0, centerY - offset);
+      const endX = Math.min(width - 1, centerX - offset + brushSize - 1);
+      const endY = Math.min(height - 1, centerY - offset + brushSize - 1);
 
-          if (px >= 0 && px < width && py >= 0 && py < height) {
-            if (selectedTool === "pencil") {
-              ctx.fillStyle = selectedColor;
-              ctx.fillRect(px, py, 1, 1);
-            } else if (selectedTool === "eraser") {
-              ctx.clearRect(px, py, 1, 1);
-            }
-          }
-        }
+      const brushWidth = endX - startX + 1;
+      const brushHeight = endY - startY + 1;
+
+      if (brushWidth <= 0 || brushHeight <= 0) return;
+
+      if (selectedTool === "pencil") {
+        // Use single fillRect for entire brush area (much faster!)
+        ctx.fillStyle = selectedColor;
+        ctx.fillRect(startX, startY, brushWidth, brushHeight);
+      } else if (selectedTool === "eraser") {
+        // Use single clearRect for entire brush area
+        ctx.clearRect(startX, startY, brushWidth, brushHeight);
       }
     };
 
@@ -833,15 +852,35 @@ export const Canvas = ({
     }
   };
 
+  const scheduleFlush = () => {
+    // Cancel any pending flush
+    if (flushTimerRef.current) {
+      clearTimeout(flushTimerRef.current);
+    }
+
+    // Schedule flush for 100ms from now (debounce)
+    flushTimerRef.current = window.setTimeout(async () => {
+      await flushDrawBatch();
+    }, 100);
+  };
+
   const flushDrawBatch = async () => {
     if (drawBatchRef.current.length === 0) return;
+
+    // Throttle: Don't flush more than once every 50ms
+    const now = Date.now();
+    if (now - lastFlushTimeRef.current < 50) {
+      scheduleFlush();
+      return;
+    }
+    lastFlushTimeRef.current = now;
 
     const batch = [...drawBatchRef.current];
     drawBatchRef.current = [];
 
     try {
-      // Apply brush size and symmetry to backend
-      const pixelsToProcess: Array<{ x: number; y: number }> = [];
+      // Use Set to deduplicate pixels (key: "x,y")
+      const pixelSet = new Set<string>();
       const offset = Math.floor(brushSize / 2);
 
       for (const { x, y } of batch) {
@@ -852,20 +891,20 @@ export const Canvas = ({
             const py = y - offset + dy;
 
             if (px >= 0 && px < width && py >= 0 && py < height) {
-              pixelsToProcess.push({ x: px, y: py });
+              pixelSet.add(`${px},${py}`);
 
               // Add symmetry pixels
               if (symmetryMode.horizontal) {
                 const mirrorX = width - 1 - px;
                 if (mirrorX >= 0 && mirrorX < width) {
-                  pixelsToProcess.push({ x: mirrorX, y: py });
+                  pixelSet.add(`${mirrorX},${py}`);
                 }
               }
 
               if (symmetryMode.vertical) {
                 const mirrorY = height - 1 - py;
                 if (mirrorY >= 0 && mirrorY < height) {
-                  pixelsToProcess.push({ x: px, y: mirrorY });
+                  pixelSet.add(`${px},${mirrorY}`);
                 }
               }
 
@@ -873,7 +912,7 @@ export const Canvas = ({
                 const mirrorX = width - 1 - px;
                 const mirrorY = height - 1 - py;
                 if (mirrorX >= 0 && mirrorX < width && mirrorY >= 0 && mirrorY < height) {
-                  pixelsToProcess.push({ x: mirrorX, y: mirrorY });
+                  pixelSet.add(`${mirrorX},${mirrorY}`);
                 }
               }
             }
@@ -881,30 +920,49 @@ export const Canvas = ({
         }
       }
 
-      // Send all pixels to Rust
-      for (const { x, y } of pixelsToProcess) {
-        if (selectedTool === "pencil") {
-          await invoke("draw_pencil", {
-            projectId,
-            x,
-            y,
-            color: selectedColor,
-          });
-        } else if (selectedTool === "eraser") {
-          await invoke("draw_eraser", {
-            projectId,
-            x,
-            y,
-          });
-        } else if (selectedTool === "colorReplace") {
-          await invoke("draw_pencil", {
-            projectId,
-            x,
-            y,
-            color: replaceToColor,
-          });
+      // Convert Set back to array of pixels
+      const uniquePixels = Array.from(pixelSet).map(key => {
+        const [x, y] = key.split(',').map(Number);
+        return { x, y };
+      });
+
+      // Batch pixels into chunks - larger chunks for better performance
+      const CHUNK_SIZE = 500;
+      const chunks = [];
+      for (let i = 0; i < uniquePixels.length; i += CHUNK_SIZE) {
+        chunks.push(uniquePixels.slice(i, i + CHUNK_SIZE));
+      }
+
+      // Process all chunks in parallel (don't wait between chunks)
+      const allPromises = [];
+      for (const chunk of chunks) {
+        for (const { x, y } of chunk) {
+          if (selectedTool === "pencil") {
+            allPromises.push(invoke("draw_pencil", {
+              projectId,
+              x,
+              y,
+              color: selectedColor,
+            }));
+          } else if (selectedTool === "eraser") {
+            allPromises.push(invoke("draw_eraser", {
+              projectId,
+              x,
+              y,
+            }));
+          } else if (selectedTool === "colorReplace") {
+            allPromises.push(invoke("draw_pencil", {
+              projectId,
+              x,
+              y,
+              color: replaceToColor,
+            }));
+          }
         }
       }
+
+      // Wait for all operations to complete in parallel
+      await Promise.all(allPromises);
     } catch (error) {
       console.error("Failed to flush draw batch:", error);
       // Re-render from backend if batch fails
