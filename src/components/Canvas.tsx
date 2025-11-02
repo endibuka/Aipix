@@ -3,6 +3,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { ColorPicker } from "./ColorPicker";
 import { LayerPanel, Layer, BlendMode } from "./LayerPanel";
 import { WebGLRenderer, RAFBatchProcessor } from "../utils/webglRenderer";
+import { SelectionOverlay } from "./SelectionOverlay";
+
+interface SelectionBounds {
+  min_x: number;
+  max_x: number;
+  min_y: number;
+  max_y: number;
+}
+
+interface Selection {
+  width: number;
+  height: number;
+  mask: boolean[];
+  bounds: SelectionBounds | null;
+}
 
 interface CanvasProps {
   projectId: string;
@@ -21,7 +36,15 @@ type Tool =
   | "rectangle"
   | "circle"
   | "select"
-  | "colorReplace";
+  | "selectEllipse"
+  | "selectLasso"
+  | "selectWand"
+  | "colorReplace"
+  | "dithering";
+
+type SelectionMode = "replace" | "add" | "subtract" | "intersect";
+
+type DitheringPattern = "checkerboard" | "bayer2x2" | "bayer4x4" | "bayer8x8" | "lines" | "dots";
 
 export const Canvas = ({
   projectId,
@@ -54,6 +77,12 @@ export const Canvas = ({
 
   const [selectedTool, setSelectedTool] = useState<Tool>("pencil");
 
+  // Selection state
+  const [selection, setSelection] = useState<Selection | null>(null);
+  const [selectionMode] = useState<SelectionMode>("replace"); // TODO: Add UI to change mode
+  const [lassoPoints, setLassoPoints] = useState<Array<{ x: number; y: number }>>([]);
+  const [magicWandTolerance] = useState<number>(32); // TODO: Add UI slider to adjust tolerance
+
   // Layer management
   const [layers, setLayers] = useState<Layer[]>([
     {
@@ -74,6 +103,9 @@ export const Canvas = ({
     horizontal: boolean;
     vertical: boolean;
   }>({ horizontal: false, vertical: false });
+
+  // Dithering tool options
+  const [ditheringPattern, setDitheringPattern] = useState<DitheringPattern>("checkerboard");
 
   // Color Replace tool options
   const [replaceFromColor, setReplaceFromColor] = useState("#000000");
@@ -315,6 +347,13 @@ export const Canvas = ({
 
         // Get canvas data and render
         await renderCanvas();
+
+        // Initialize selection
+        await invoke("create_selection", {
+          projectId,
+          width,
+          height,
+        });
       } catch (error) {
         console.error("Failed to initialize canvas:", error);
       }
@@ -529,6 +568,13 @@ export const Canvas = ({
               ctx.globalAlpha = 0.3;
               ctx.fillRect(px, py, 1, 1);
               ctx.globalAlpha = 1.0;
+            } else if (selectedTool === "dithering") {
+              // Show dithering pattern preview
+              const useMainColor = getDitheringValue(px, py, ditheringPattern);
+              ctx.fillStyle = useMainColor ? mainColor : secondaryColor;
+              ctx.globalAlpha = 0.5;
+              ctx.fillRect(px, py, 1, 1);
+              ctx.globalAlpha = 1.0;
             }
           }
         }
@@ -622,6 +668,37 @@ export const Canvas = ({
       return;
     }
 
+    // Selection tools
+    if (selectedTool === "select" || selectedTool === "selectEllipse") {
+      setStartPos({ x, y });
+      setIsDrawing(true);
+      return;
+    }
+
+    if (selectedTool === "selectLasso") {
+      // Start lasso selection
+      setLassoPoints([{ x, y }]);
+      setIsDrawing(true);
+      return;
+    }
+
+    if (selectedTool === "selectWand") {
+      // Magic wand selection
+      try {
+        const result: Selection = await invoke("select_magic_wand", {
+          projectId,
+          x,
+          y,
+          tolerance: magicWandTolerance,
+          mode: selectionMode,
+        });
+        setSelection(result);
+      } catch (error) {
+        console.error("Failed to select with magic wand:", error);
+      }
+      return;
+    }
+
     if (selectedTool === "line" || selectedTool === "rectangle" || selectedTool === "circle") {
       setStartPos({ x, y });
       setIsDrawing(true);
@@ -695,8 +772,8 @@ export const Canvas = ({
     // Update cursor position for display
     setCursorPos({ x, y });
 
-    // Update hover preview for pencil/eraser when not drawing
-    if (!isDrawing && (selectedTool === "pencil" || selectedTool === "eraser")) {
+    // Update hover preview for pencil/eraser/dithering when not drawing
+    if (!isDrawing && (selectedTool === "pencil" || selectedTool === "eraser" || selectedTool === "dithering")) {
       setHoverPos({ x, y });
       drawHoverPreview(x, y);
     }
@@ -715,7 +792,14 @@ export const Canvas = ({
 
     if (!isDrawing) return;
 
-    if (selectedTool === "line" || selectedTool === "rectangle" || selectedTool === "circle") {
+    // Selection tool previews
+    if (selectedTool === "selectLasso" && isDrawing) {
+      // Add point to lasso
+      setLassoPoints((prev) => [...prev, { x, y }]);
+      return;
+    }
+
+    if (selectedTool === "line" || selectedTool === "rectangle" || selectedTool === "circle" || selectedTool === "select" || selectedTool === "selectEllipse") {
       // Draw preview
       if (startPos && previewCanvas) {
         const canvas = canvasRef.current;
@@ -743,6 +827,12 @@ export const Canvas = ({
         } else if (selectedTool === "circle") {
           // Draw circle preview
           drawCirclePreview(previewCtx, startPos.x, startPos.y, x, y);
+        } else if (selectedTool === "select") {
+          // Draw rectangular selection preview
+          drawSelectionRectPreview(previewCtx, startPos.x, startPos.y, x, y);
+        } else if (selectedTool === "selectEllipse") {
+          // Draw elliptical selection preview
+          drawSelectionEllipsePreview(previewCtx, startPos.x, startPos.y, x, y);
         }
 
         // Composite preview onto main canvas
@@ -835,6 +925,52 @@ export const Canvas = ({
         console.error("Failed to draw circle:", error);
       }
       setStartPos(null);
+    } else if (selectedTool === "select" && startPos) {
+      // Rectangular selection
+      try {
+        const result: Selection = await invoke("select_rectangle", {
+          projectId,
+          x0: startPos.x,
+          y0: startPos.y,
+          x1: x,
+          y1: y,
+          mode: selectionMode,
+        });
+        setSelection(result);
+      } catch (error) {
+        console.error("Failed to create rectangular selection:", error);
+      }
+      setStartPos(null);
+    } else if (selectedTool === "selectEllipse" && startPos) {
+      // Elliptical selection
+      try {
+        const result: Selection = await invoke("select_ellipse", {
+          projectId,
+          centerX: startPos.x,
+          centerY: startPos.y,
+          endX: x,
+          endY: y,
+          mode: selectionMode,
+        });
+        setSelection(result);
+      } catch (error) {
+        console.error("Failed to create elliptical selection:", error);
+      }
+      setStartPos(null);
+    } else if (selectedTool === "selectLasso" && lassoPoints.length > 2) {
+      // Lasso selection - convert points to (i32, i32) tuples
+      try {
+        const points = lassoPoints.map((p) => [p.x, p.y]);
+        const result: Selection = await invoke("select_lasso", {
+          projectId,
+          points,
+          mode: selectionMode,
+        });
+        setSelection(result);
+        setLassoPoints([]);
+      } catch (error) {
+        console.error("Failed to create lasso selection:", error);
+      }
     } else if (selectedTool === "pencil" || selectedTool === "eraser") {
       // Flush any remaining draw operations
       await flushDrawBatch();
@@ -842,6 +978,55 @@ export const Canvas = ({
 
     // Reset last position
     lastPosRef.current = null;
+  };
+
+  // Dithering pattern functions
+  const getDitheringValue = (x: number, y: number, pattern: DitheringPattern): boolean => {
+    switch (pattern) {
+      case "checkerboard":
+        return (x + y) % 2 === 0;
+
+      case "bayer2x2": {
+        const bayerMatrix2x2 = [
+          [0, 2],
+          [3, 1]
+        ];
+        return bayerMatrix2x2[y % 2][x % 2] < 2;
+      }
+
+      case "bayer4x4": {
+        const bayerMatrix4x4 = [
+          [0,  8,  2,  10],
+          [12, 4,  14, 6],
+          [3,  11, 1,  9],
+          [15, 7,  13, 5]
+        ];
+        return bayerMatrix4x4[y % 4][x % 4] < 8;
+      }
+
+      case "bayer8x8": {
+        const bayerMatrix8x8 = [
+          [0,  32, 8,  40, 2,  34, 10, 42],
+          [48, 16, 56, 24, 50, 18, 58, 26],
+          [12, 44, 4,  36, 14, 46, 6,  38],
+          [60, 28, 52, 20, 62, 30, 54, 22],
+          [3,  35, 11, 43, 1,  33, 9,  41],
+          [51, 19, 59, 27, 49, 17, 57, 25],
+          [15, 47, 7,  39, 13, 45, 5,  37],
+          [63, 31, 55, 23, 61, 29, 53, 21]
+        ];
+        return bayerMatrix8x8[y % 8][x % 8] < 32;
+      }
+
+      case "lines":
+        return y % 2 === 0;
+
+      case "dots":
+        return x % 2 === 0 && y % 2 === 0;
+
+      default:
+        return (x + y) % 2 === 0;
+    }
   };
 
   const drawPixelImmediate = (x: number, y: number) => {
@@ -872,6 +1057,16 @@ export const Canvas = ({
       } else if (selectedTool === "eraser") {
         // Use single clearRect for entire brush area
         ctx.clearRect(startX, startY, brushWidth, brushHeight);
+      } else if (selectedTool === "dithering") {
+        // Dithering: draw pixels based on pattern with main and secondary colors
+        ctx.fillStyle = mainColor;
+        for (let py = startY; py <= endY; py++) {
+          for (let px = startX; px <= endX; px++) {
+            const useMainColor = getDitheringValue(px, py, ditheringPattern);
+            ctx.fillStyle = useMainColor ? mainColor : secondaryColor;
+            ctx.fillRect(px, py, 1, 1);
+          }
+        }
       }
     };
 
@@ -1257,6 +1452,58 @@ export const Canvas = ({
     }
   };
 
+  const drawSelectionRectPreview = (
+    ctx: CanvasRenderingContext2D,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number
+  ) => {
+    const minX = Math.min(x0, x1);
+    const maxX = Math.max(x0, x1);
+    const minY = Math.min(y0, y1);
+    const maxY = Math.max(y0, y1);
+
+    // Draw marching ants effect
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.strokeRect(minX + 0.5, minY + 0.5, maxX - minX, maxY - minY);
+
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineDashOffset = 4;
+    ctx.strokeRect(minX + 0.5, minY + 0.5, maxX - minX, maxY - minY);
+    ctx.setLineDash([]);
+  };
+
+  const drawSelectionEllipsePreview = (
+    ctx: CanvasRenderingContext2D,
+    centerX: number,
+    centerY: number,
+    endX: number,
+    endY: number
+  ) => {
+    const dx = Math.abs(endX - centerX);
+    const dy = Math.abs(endY - centerY);
+
+    if (dx === 0 && dy === 0) return;
+
+    // Draw marching ants ellipse
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.ellipse(centerX + 0.5, centerY + 0.5, dx, dy, 0, 0, 2 * Math.PI);
+    ctx.stroke();
+
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineDashOffset = 4;
+    ctx.beginPath();
+    ctx.ellipse(centerX + 0.5, centerY + 0.5, dx, dy, 0, 0, 2 * Math.PI);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  };
+
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     e.preventDefault();
 
@@ -1350,7 +1597,7 @@ export const Canvas = ({
     },
     {
       id: "select",
-      label: "Select",
+      label: "Rectangle Select",
       icon: (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
           <path d="M5 3a2 2 0 0 0-2 2" />
@@ -1370,6 +1617,44 @@ export const Canvas = ({
       shortcut: "M",
     },
     {
+      id: "selectEllipse",
+      label: "Ellipse Select",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+          <ellipse cx="12" cy="12" rx="9" ry="6" strokeDasharray="2 2" />
+        </svg>
+      ),
+      shortcut: "O",
+    },
+    {
+      id: "selectLasso",
+      label: "Lasso Select",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+          <path d="M3 12c0-4.5 3-7 7-7s6 2.5 8 6c1 2 1 4 0 6-2 3.5-4 6-8 6s-7-2.5-7-7" strokeDasharray="2 2" />
+        </svg>
+      ),
+      shortcut: "W",
+    },
+    {
+      id: "selectWand",
+      label: "Magic Wand",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+          <path d="M15 4V2" />
+          <path d="M15 16v-2" />
+          <path d="M8 9h2" />
+          <path d="M20 9h2" />
+          <path d="M17.8 11.8 19 13" />
+          <path d="M15 9h0" />
+          <path d="M17.8 6.2 19 5" />
+          <path d="m3 21 9-9" />
+          <path d="M12.2 6.2 11 5" />
+        </svg>
+      ),
+      shortcut: "W",
+    },
+    {
       id: "colorReplace",
       label: "Color Replace",
       icon: (
@@ -1380,6 +1665,19 @@ export const Canvas = ({
         </svg>
       ),
       shortcut: "H",
+    },
+    {
+      id: "dithering",
+      label: "Dithering",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+          <rect x="3" y="3" width="7" height="7" />
+          <rect x="14" y="3" width="7" height="7" />
+          <rect x="14" y="14" width="7" height="7" />
+          <rect x="3" y="14" width="7" height="7" />
+        </svg>
+      ),
+      shortcut: "D",
     },
   ];
 
@@ -1442,10 +1740,10 @@ export const Canvas = ({
 
   // Update hover preview when settings change
   useEffect(() => {
-    if (hoverPos && (selectedTool === "pencil" || selectedTool === "eraser")) {
+    if (hoverPos && (selectedTool === "pencil" || selectedTool === "eraser" || selectedTool === "dithering")) {
       drawHoverPreview(hoverPos.x, hoverPos.y);
     }
-  }, [brushSize, symmetryMode, selectedColor, selectedTool, hoverPos]);
+  }, [brushSize, symmetryMode, selectedColor, selectedTool, hoverPos, ditheringPattern, mainColor, secondaryColor]);
 
   // Hide brush size overlay when switching away from pencil/eraser
   useEffect(() => {
@@ -1525,6 +1823,82 @@ export const Canvas = ({
         e.preventDefault();
         console.log("Redo triggered");
         handleRedo();
+        return;
+      }
+
+      // Selection shortcuts
+      // Select All: Ctrl+A
+      if ((e.ctrlKey || e.metaKey) && key === "a") {
+        e.preventDefault();
+        invoke<Selection>("select_all", { projectId })
+          .then((result) => setSelection(result))
+          .catch((error) => console.error("Failed to select all:", error));
+        return;
+      }
+
+      // Deselect: Ctrl+D
+      if ((e.ctrlKey || e.metaKey) && key === "d") {
+        e.preventDefault();
+        invoke<void>("deselect", { projectId })
+          .then(() => setSelection(null))
+          .catch((error) => console.error("Failed to deselect:", error));
+        return;
+      }
+
+      // Invert Selection: Ctrl+Shift+I
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && key === "i") {
+        e.preventDefault();
+        invoke<Selection>("invert_selection", { projectId })
+          .then((result) => setSelection(result))
+          .catch((error) => console.error("Failed to invert selection:", error));
+        return;
+      }
+
+      // Copy: Ctrl+C
+      if ((e.ctrlKey || e.metaKey) && key === "c" && selection && selection.bounds) {
+        e.preventDefault();
+        invoke("copy_selection", { projectId })
+          .then(() => console.log("Selection copied"))
+          .catch((error) => console.error("Failed to copy selection:", error));
+        return;
+      }
+
+      // Cut: Ctrl+X
+      if ((e.ctrlKey || e.metaKey) && key === "x" && selection && selection.bounds) {
+        e.preventDefault();
+        invoke("cut_selection", { projectId })
+          .then(() => {
+            console.log("Selection cut");
+            renderCanvas();
+          })
+          .catch((error) => console.error("Failed to cut selection:", error));
+        return;
+      }
+
+      // Paste: Ctrl+V
+      if ((e.ctrlKey || e.metaKey) && key === "v") {
+        e.preventDefault();
+        // Paste at 0,0 or at selection bounds if exists
+        const x = selection?.bounds?.min_x ?? 0;
+        const y = selection?.bounds?.min_y ?? 0;
+        invoke("paste_selection", { projectId, x, y })
+          .then(() => {
+            console.log("Selection pasted");
+            renderCanvas();
+          })
+          .catch((error) => console.error("Failed to paste selection:", error));
+        return;
+      }
+
+      // Delete selected pixels: Delete or Backspace
+      if ((key === "delete" || key === "backspace") && selection && selection.bounds) {
+        e.preventDefault();
+        invoke("delete_selected", { projectId })
+          .then(() => {
+            console.log("Selection deleted");
+            renderCanvas();
+          })
+          .catch((error) => console.error("Failed to delete selection:", error));
         return;
       }
 
@@ -2121,6 +2495,29 @@ export const Canvas = ({
               </>
             )}
 
+            {/* Dithering Pattern Selector */}
+            {selectedTool === "dithering" && (
+              <>
+                <div className="h-10 w-px bg-[#8a7d6e]" />
+                <div className="flex items-center gap-2">
+                  <span className="text-[#1d1d1d] text-xs uppercase tracking-wider font-semibold">Pattern</span>
+                  <select
+                    value={ditheringPattern}
+                    onChange={(e) => setDitheringPattern(e.target.value as DitheringPattern)}
+                    className="h-10 px-3 text-sm border bg-[#c8b79e] border-[#8a7d6e] text-[#1d1d1d] focus:border-[#5a5349] focus:outline-none focus:ring-1 focus:ring-[#5a5349] transition-all font-semibold cursor-pointer"
+                    title="Dithering Pattern"
+                  >
+                    <option value="checkerboard">Checkerboard</option>
+                    <option value="bayer2x2">Bayer 2×2</option>
+                    <option value="bayer4x4">Bayer 4×4</option>
+                    <option value="bayer8x8">Bayer 8×8</option>
+                    <option value="lines">Lines</option>
+                    <option value="dots">Dots</option>
+                  </select>
+                </div>
+              </>
+            )}
+
             {/* Tool Display */}
             <div className="ml-auto flex items-center gap-2 bg-[#1d1d1d] border border-[#1a1a1a] px-3 py-2">
               {tools.find(t => t.id === selectedTool)?.icon}
@@ -2385,6 +2782,14 @@ export const Canvas = ({
                     : `url("data:image/svg+xml,%3Csvg width='32' height='32' xmlns='http://www.w3.org/2000/svg'%3E%3Cg stroke='white' stroke-width='5' stroke-linecap='square'%3E%3Cline x1='16' y1='3' x2='16' y2='11'/%3E%3Cline x1='16' y1='21' x2='16' y2='29'/%3E%3Cline x1='3' y1='16' x2='11' y2='16'/%3E%3Cline x1='21' y1='16' x2='29' y2='16'/%3E%3C/g%3E%3Cg stroke='black' stroke-width='2' stroke-linecap='square'%3E%3Cline x1='16' y1='3' x2='16' y2='11'/%3E%3Cline x1='16' y1='21' x2='16' y2='29'/%3E%3Cline x1='3' y1='16' x2='11' y2='16'/%3E%3Cline x1='21' y1='16' x2='29' y2='16'/%3E%3C/g%3E%3C/svg%3E") 16 16, crosshair`,
               }}
             />
+
+            {/* Selection Overlay - Marching Ants */}
+            <SelectionOverlay
+              selection={selection}
+              canvasWidth={width}
+              canvasHeight={height}
+              zoom={zoom}
+            />
           </div>
 
           {/* Brush Size Overlay - Ctrl+Drag */}
@@ -2570,6 +2975,10 @@ export const Canvas = ({
                   <div className="flex justify-between">
                     <span className="text-[#9b978e]">Color Replace</span>
                     <kbd className="bg-[#1d1d1d] px-2 py-0.5 rounded border border-[#1a1a1a]">H</kbd>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#9b978e]">Dithering</span>
+                    <kbd className="bg-[#1d1d1d] px-2 py-0.5 rounded border border-[#1a1a1a]">D</kbd>
                   </div>
                 </div>
               </div>

@@ -11,3 +11,4 @@ pub use pixel_buffer::PixelBuffer;
 pub use layer::Layer;
 pub use animation::Frame;
 pub use history::CanvasHistory;
+pub use tools::{Selection, SelectionMode, SelectionBounds};

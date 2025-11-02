@@ -47,6 +47,9 @@ pub fn initialize_database(conn: &Connection) -> Result<()> {
             name TEXT NOT NULL,
             width INTEGER NOT NULL,
             height INTEGER NOT NULL,
+            color_mode TEXT NOT NULL DEFAULT 'rgba',
+            background_color TEXT NOT NULL DEFAULT '#00000000',
+            pixel_aspect_ratio TEXT NOT NULL DEFAULT '1:1',
             thumbnail BLOB,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -163,6 +166,45 @@ pub fn initialize_database(conn: &Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_projects_user_folder ON projects(user_id, folder_id)",
         (),
     )?;
+
+    // Run migrations for existing databases
+    run_migrations(conn)?;
+
+    Ok(())
+}
+
+pub fn run_migrations(conn: &Connection) -> Result<()> {
+    // Check if projects table needs new columns
+    let table_info: Vec<(i32, String, String)> = conn
+        .prepare("PRAGMA table_info(projects)")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let has_color_mode = table_info.iter().any(|(_, name, _)| name == "color_mode");
+    let has_background_color = table_info.iter().any(|(_, name, _)| name == "background_color");
+    let has_pixel_aspect_ratio = table_info.iter().any(|(_, name, _)| name == "pixel_aspect_ratio");
+
+    // Add missing columns if needed
+    if !has_color_mode {
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN color_mode TEXT NOT NULL DEFAULT 'rgba'",
+            (),
+        )?;
+    }
+
+    if !has_background_color {
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN background_color TEXT NOT NULL DEFAULT '#00000000'",
+            (),
+        )?;
+    }
+
+    if !has_pixel_aspect_ratio {
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN pixel_aspect_ratio TEXT NOT NULL DEFAULT '1:1'",
+            (),
+        )?;
+    }
 
     Ok(())
 }

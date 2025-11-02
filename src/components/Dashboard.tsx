@@ -64,6 +64,9 @@ export const Dashboard = memo(({ onOpenSettings, onOpenProject }: DashboardProps
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectWidth, setNewProjectWidth] = useState(32);
   const [newProjectHeight, setNewProjectHeight] = useState(32);
+  const [newProjectColorMode, setNewProjectColorMode] = useState("rgba");
+  const [newProjectBackgroundColor, setNewProjectBackgroundColor] = useState("#00000000");
+  const [newProjectPixelAspectRatio, setNewProjectPixelAspectRatio] = useState("1:1");
 
   // Form state for new folder
   const [newFolderName, setNewFolderName] = useState("");
@@ -195,6 +198,9 @@ export const Dashboard = memo(({ onOpenSettings, onOpenProject }: DashboardProps
       setNewProjectName("");
       setNewProjectWidth(32);
       setNewProjectHeight(32);
+      setNewProjectColorMode("rgba");
+      setNewProjectBackgroundColor("#00000000");
+      setNewProjectPixelAspectRatio("1:1");
       setShowNewProject(false);
       setIsCreatingProject(false);
 
@@ -207,6 +213,9 @@ export const Dashboard = memo(({ onOpenSettings, onOpenProject }: DashboardProps
           name: projectName,
           width: projectWidth,
           height: projectHeight,
+          color_mode: newProjectColorMode,
+          background_color: newProjectBackgroundColor,
+          pixel_aspect_ratio: newProjectPixelAspectRatio,
           thumbnail: null,
           created_at: now,
           updated_at: now,
@@ -219,7 +228,7 @@ export const Dashboard = memo(({ onOpenSettings, onOpenProject }: DashboardProps
         setProjects((prev) => prev.filter((p) => p.id !== projectId));
       });
     },
-    [newProjectName, newProjectWidth, newProjectHeight, userId]
+    [newProjectName, newProjectWidth, newProjectHeight, newProjectColorMode, newProjectBackgroundColor, newProjectPixelAspectRatio, userId]
   );
 
   // Optimistic UI folder creation
@@ -551,6 +560,66 @@ export const Dashboard = memo(({ onOpenSettings, onOpenProject }: DashboardProps
                              text-[#d6d2ca] text-sm focus:outline-none focus:border-[#8aa7ff]"
                   />
                 </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs text-[#9b978e] uppercase tracking-wide">
+                  Color Mode
+                </label>
+                <select
+                  value={newProjectColorMode}
+                  onChange={(e) => setNewProjectColorMode(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#1d1d1d] border border-[#1a1a1a]
+                           text-[#d6d2ca] text-sm focus:outline-none focus:border-[#8aa7ff]"
+                >
+                  <option value="rgba">RGBA (Full Color)</option>
+                  <option value="rgb">RGB (No Alpha)</option>
+                  <option value="indexed">Indexed (Palette)</option>
+                  <option value="grayscale">Grayscale</option>
+                </select>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs text-[#9b978e] uppercase tracking-wide">
+                  Background Color
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="color"
+                    value={newProjectBackgroundColor.substring(0, 7)}
+                    onChange={(e) => {
+                      const alpha = newProjectBackgroundColor.length === 9 ? newProjectBackgroundColor.substring(7) : "ff";
+                      setNewProjectBackgroundColor(e.target.value + alpha);
+                    }}
+                    className="w-16 h-10 bg-[#1d1d1d] border border-[#1a1a1a] cursor-pointer"
+                  />
+                  <input
+                    type="text"
+                    value={newProjectBackgroundColor}
+                    onChange={(e) => setNewProjectBackgroundColor(e.target.value)}
+                    className="flex-1 px-3 py-2 bg-[#1d1d1d] border border-[#1a1a1a]
+                             text-[#d6d2ca] text-sm focus:outline-none focus:border-[#8aa7ff] font-mono"
+                    placeholder="#RRGGBBAA"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs text-[#9b978e] uppercase tracking-wide">
+                  Pixel Aspect Ratio
+                </label>
+                <select
+                  value={newProjectPixelAspectRatio}
+                  onChange={(e) => setNewProjectPixelAspectRatio(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#1d1d1d] border border-[#1a1a1a]
+                           text-[#d6d2ca] text-sm focus:outline-none focus:border-[#8aa7ff]"
+                >
+                  <option value="1:1">Square (1:1)</option>
+                  <option value="2:1">Wide (2:1)</option>
+                  <option value="1:2">Tall (1:2)</option>
+                  <option value="4:3">Classic (4:3)</option>
+                  <option value="16:9">Widescreen (16:9)</option>
+                </select>
               </div>
 
               <div className="flex gap-2 pt-4">

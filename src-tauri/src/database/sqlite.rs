@@ -95,8 +95,8 @@ impl Database {
 
         // Insert project
         conn.execute(
-            "INSERT INTO projects (id, user_id, folder_id, name, width, height, thumbnail, created_at, updated_at, last_modified, synced_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO projects (id, user_id, folder_id, name, width, height, color_mode, background_color, pixel_aspect_ratio, thumbnail, created_at, updated_at, last_modified, synced_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 project.id,
                 project.user_id,
@@ -104,6 +104,9 @@ impl Database {
                 project.name,
                 project.width,
                 project.height,
+                project.color_mode,
+                project.background_color,
+                project.pixel_aspect_ratio,
                 project.thumbnail,
                 project.created_at.to_rfc3339(),
                 project.updated_at.to_rfc3339(),
@@ -131,7 +134,7 @@ impl Database {
     pub fn get_projects_by_user(&self, user_id: &str) -> Result<Vec<Project>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, user_id, folder_id, name, width, height, thumbnail, created_at, updated_at, last_modified, synced_at
+            "SELECT id, user_id, folder_id, name, width, height, color_mode, background_color, pixel_aspect_ratio, thumbnail, created_at, updated_at, last_modified, synced_at
              FROM projects WHERE user_id = ?1 ORDER BY last_modified DESC"
         )?;
 
@@ -143,11 +146,14 @@ impl Database {
                 name: row.get(3)?,
                 width: row.get(4)?,
                 height: row.get(5)?,
-                thumbnail: row.get(6)?,
-                created_at: row.get::<_, String>(7)?.parse().unwrap(),
-                updated_at: row.get::<_, String>(8)?.parse().unwrap(),
-                last_modified: row.get::<_, String>(9)?.parse().unwrap(),
-                synced_at: row.get::<_, Option<String>>(10)?
+                color_mode: row.get(6)?,
+                background_color: row.get(7)?,
+                pixel_aspect_ratio: row.get(8)?,
+                thumbnail: row.get(9)?,
+                created_at: row.get::<_, String>(10)?.parse().unwrap(),
+                updated_at: row.get::<_, String>(11)?.parse().unwrap(),
+                last_modified: row.get::<_, String>(12)?.parse().unwrap(),
+                synced_at: row.get::<_, Option<String>>(13)?
                     .and_then(|s| s.parse().ok()),
             })
         })?
@@ -159,12 +165,15 @@ impl Database {
     pub fn update_project(&self, project: &Project) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE projects SET name = ?1, width = ?2, height = ?3, thumbnail = ?4, updated_at = ?5, last_modified = ?6, folder_id = ?7
-             WHERE id = ?8",
+            "UPDATE projects SET name = ?1, width = ?2, height = ?3, color_mode = ?4, background_color = ?5, pixel_aspect_ratio = ?6, thumbnail = ?7, updated_at = ?8, last_modified = ?9, folder_id = ?10
+             WHERE id = ?11",
             params![
                 project.name,
                 project.width,
                 project.height,
+                project.color_mode,
+                project.background_color,
+                project.pixel_aspect_ratio,
                 project.thumbnail,
                 project.updated_at.to_rfc3339(),
                 project.last_modified.to_rfc3339(),
