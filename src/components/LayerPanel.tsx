@@ -74,30 +74,38 @@ export const LayerPanel = ({
   const blendModes: BlendMode[] = ["normal", "multiply", "screen", "overlay", "darken", "lighten"];
 
   return (
-    <div className="w-64 bg-[#2b2b2b] border-l border-[#1a1a1a] flex flex-col overflow-hidden">
+    <div className="w-full h-full flex flex-col overflow-hidden">
       {/* Header */}
-      <div className="p-3 border-b border-[#1a1a1a]">
-        <div className="text-[10px] text-[#9b978e] uppercase tracking-wider mb-2 font-mono">
+      <div className="p-4 border-b border-[#1a1a1a]">
+        <div className="text-xs text-[#9b978e] uppercase tracking-wider mb-3 font-mono font-bold">
           Layers
         </div>
-        <div className="flex gap-1">
+        <div className="flex gap-2">
           <button
             onClick={onLayerAdd}
-            className="flex-1 px-2 py-1.5 text-[10px] bg-[#1d1d1d] border border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040] transition-all"
+            className="flex-1 px-3 py-2 text-[10px] bg-[#1d1d1d] border border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#8aa7ff] hover:border-[#8aa7ff] hover:text-[#1d1d1d] transition-all rounded font-semibold"
             title="Add Layer"
           >
-            + Add
+            <div className="flex items-center justify-center gap-1">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              Add
+            </div>
           </button>
           <button
             onClick={() => {
               const activeLayer = layers.find((l) => l.id === activeLayerId);
               if (activeLayer) onLayerDuplicate(activeLayer.id);
             }}
-            className="flex-1 px-2 py-1.5 text-[10px] bg-[#1d1d1d] border border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040] transition-all"
+            className="px-3 py-2 text-[10px] bg-[#1d1d1d] border border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040] transition-all rounded disabled:opacity-30 disabled:cursor-not-allowed"
             title="Duplicate Layer"
             disabled={!activeLayerId}
           >
-            Duplicate
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
           </button>
           <button
             onClick={() => {
@@ -105,17 +113,19 @@ export const LayerPanel = ({
                 onLayerDelete(activeLayerId);
               }
             }}
-            className="px-2 py-1.5 text-[10px] bg-[#1d1d1d] border border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#ff4444] hover:border-[#ff4444] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-3 py-2 text-[10px] bg-[#1d1d1d] border border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#ff4444] hover:border-[#ff4444] transition-all rounded disabled:opacity-30 disabled:cursor-not-allowed"
             title="Delete Layer"
             disabled={!activeLayerId || layers.length <= 1}
           >
-            Delete
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
           </button>
         </div>
       </div>
 
       {/* Layers List */}
-      <div className="flex-1 overflow-y-auto p-2 space-y-1">
+      <div className="flex-1 overflow-y-auto p-3 space-y-2">
         {layers.map((layer, index) => {
           const isActive = layer.id === activeLayerId;
           const isEditing = layer.id === editingLayerId;
@@ -128,11 +138,11 @@ export const LayerPanel = ({
               onDragOver={(e) => handleDragOver(e, index)}
               onDragEnd={handleDragEnd}
               onClick={() => onLayerSelect(layer.id)}
-              className={`border rounded p-2 cursor-pointer transition-all ${
+              className={`border rounded-lg p-3 cursor-pointer transition-all ${
                 isActive
-                  ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d]"
-                  : "bg-[#1d1d1d] border-[#1a1a1a] hover:bg-[#2b2b2b] text-[#d6d2ca]"
-              } ${draggedIndex === index ? "opacity-50" : ""}`}
+                  ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] shadow-lg scale-[1.02]"
+                  : "bg-[#1d1d1d] border-[#1a1a1a] hover:bg-[#2b2b2b] hover:border-[#404040] text-[#d6d2ca]"
+              } ${draggedIndex === index ? "opacity-50 scale-95" : ""}`}
             >
               <div className="flex items-center gap-2">
                 {/* Visibility Toggle */}
@@ -174,7 +184,7 @@ export const LayerPanel = ({
                 {/* Thumbnail */}
                 {layer.thumbnail && (
                   <div
-                    className="w-8 h-8 border border-[#505050] flex-shrink-0"
+                    className="w-10 h-10 border-2 border-[#505050] flex-shrink-0 rounded"
                     style={{
                       backgroundImage: `url(${layer.thumbnail})`,
                       backgroundSize: "contain",
@@ -221,12 +231,12 @@ export const LayerPanel = ({
 
               {/* Layer Controls (shown when active) */}
               {isActive && !isEditing && (
-                <div className="mt-2 pt-2 border-t border-[#1a1a1a] space-y-2">
+                <div className="mt-3 pt-3 border-t border-[#1d1d1d] space-y-3">
                   {/* Opacity Slider */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] text-[#1d1d1d] w-12">
-                      Opacity
-                    </span>
+                  <div className="flex items-center gap-3">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 flex-shrink-0">
+                      <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z" />
+                    </svg>
                     <input
                       type="range"
                       min="0"
@@ -237,19 +247,22 @@ export const LayerPanel = ({
                         onLayerOpacityChange(layer.id, Number(e.target.value));
                       }}
                       onClick={(e) => e.stopPropagation()}
-                      className="flex-1 h-1 bg-[#2b2b2b] rounded-lg appearance-none cursor-pointer"
+                      className="flex-1 h-2 bg-[#2b2b2b] rounded-lg appearance-none cursor-pointer"
                       style={{
                         accentColor: "#1d1d1d",
                       }}
                     />
-                    <span className="text-[9px] text-[#1d1d1d] w-8 text-right">
+                    <span className="text-[10px] text-[#1d1d1d] w-10 text-right font-semibold">
                       {layer.opacity}%
                     </span>
                   </div>
 
                   {/* Blend Mode */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] text-[#1d1d1d] w-12">Blend</span>
+                  <div className="flex items-center gap-3">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 flex-shrink-0">
+                      <circle cx="12" cy="12" r="3" />
+                      <path d="M12 1v6m0 6v6" />
+                    </svg>
                     <select
                       value={layer.blendMode}
                       onChange={(e) => {
@@ -257,7 +270,7 @@ export const LayerPanel = ({
                         onLayerBlendModeChange(layer.id, e.target.value as BlendMode);
                       }}
                       onClick={(e) => e.stopPropagation()}
-                      className="flex-1 bg-[#2b2b2b] border border-[#1a1a1a] px-1 py-0.5 text-[9px] font-mono focus:outline-none focus:border-[#8aa7ff] text-[#d6d2ca]"
+                      className="flex-1 bg-[#2b2b2b] border border-[#1a1a1a] px-2 py-1 text-[10px] font-mono focus:outline-none focus:border-[#1d1d1d] text-[#d6d2ca] rounded"
                     >
                       {blendModes.map((mode) => (
                         <option key={mode} value={mode}>
