@@ -244,6 +244,32 @@ pub fn circle(
     Ok(())
 }
 
+/// Color Replace tool - replaces all instances of a target color with a new color
+pub fn replace_all_color(
+    buffer: &mut PixelBuffer,
+    target_color: [u8; 4],
+    new_color: [u8; 4],
+) {
+    let width = buffer.width;
+    let height = buffer.height;
+
+    // Iterate through all pixels
+    for y in 0..height {
+        for x in 0..width {
+            if let Some(current_color) = buffer.get_pixel(x, y) {
+                // Compare RGB values (ignore alpha for comparison)
+                if current_color[0] == target_color[0]
+                    && current_color[1] == target_color[1]
+                    && current_color[2] == target_color[2]
+                {
+                    // Replace with new color
+                    let _ = buffer.set_pixel(x, y, new_color);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

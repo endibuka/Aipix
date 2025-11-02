@@ -355,6 +355,26 @@ fn pick_color(
     Ok(engine::tools::rgba_to_hex(rgba))
 }
 
+#[tauri::command]
+fn replace_color(
+    state: State<AppState>,
+    project_id: String,
+    target_color: String,
+    new_color: String,
+) -> Result<(), String> {
+    let mut canvases = state.canvases.lock().unwrap();
+    let history = canvases
+        .get_mut(&project_id)
+        .ok_or("Canvas not found")?;
+
+    let target_rgba = engine::tools::hex_to_rgba(&target_color)?;
+    let new_rgba = engine::tools::hex_to_rgba(&new_color)?;
+
+    engine::tools::replace_all_color(&mut history.buffer, target_rgba, new_rgba);
+
+    Ok(())
+}
+
 // History commands
 #[tauri::command]
 fn save_history_state(
@@ -455,6 +475,7 @@ fn main() {
             draw_circle,
             draw_fill,
             pick_color,
+            replace_color,
             save_history_state,
             undo_canvas,
             redo_canvas,

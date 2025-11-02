@@ -20,7 +20,8 @@ type Tool =
   | "line"
   | "rectangle"
   | "circle"
-  | "select";
+  | "select"
+  | "colorReplace";
 
 export const Canvas = ({
   projectId,
@@ -30,6 +31,7 @@ export const Canvas = ({
   onBack,
 }: CanvasProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasContainerRef = useRef<HTMLDivElement>(null);
   const webglRendererRef = useRef<WebGLRenderer | null>(null);
   const rafProcessorRef = useRef<RAFBatchProcessor>(new RAFBatchProcessor());
 
@@ -57,6 +59,10 @@ export const Canvas = ({
     vertical: boolean;
   }>({ horizontal: false, vertical: false });
 
+  // Color Replace tool options
+  const [replaceFromColor, setReplaceFromColor] = useState("#000000");
+  const [replaceToColor, setReplaceToColor] = useState("#ffffff");
+
   // Reference image overlay
   const [referenceImage, setReferenceImage] = useState<string | null>(null);
   const [referenceOpacity, setReferenceOpacity] = useState(30); // 0-100
@@ -64,6 +70,14 @@ export const Canvas = ({
 
   // Keyboard shortcut cheatsheet
   const [showCheatsheet, setShowCheatsheet] = useState(false);
+
+  // Tool context menu for right-click
+  const [toolContextMenu, setToolContextMenu] = useState<{
+    visible: boolean;
+    x: number;
+    y: number;
+    tool: Tool;
+  } | null>(null);
 
   // Calculate initial zoom based on canvas size
   const getInitialZoom = () => {
@@ -85,6 +99,12 @@ export const Canvas = ({
   // Alt key for temporary eyedropper
   const [isAltPressed, setIsAltPressed] = useState(false);
   const [previousTool, setPreviousTool] = useState<Tool | null>(null);
+
+  // Space key for temporary pan tool
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState<{ x: number; y: number } | null>(null);
+  const [scrollOffset, setScrollOffset] = useState({ x: 0, y: 0 });
 
   // Cursor position tracking
   const [cursorPos, setCursorPos] = useState<{ x: number; y: number } | null>(null);
@@ -511,6 +531,20 @@ export const Canvas = ({
   };
 
   const handleMouseDown = async (e: React.MouseEvent<HTMLCanvasElement>) => {
+    // Handle panning with space key
+    if (isSpacePressed) {
+      setIsPanning(true);
+      setPanStart({ x: e.clientX, y: e.clientY });
+      // Store current scroll position
+      if (canvasContainerRef.current) {
+        setScrollOffset({
+          x: canvasContainerRef.current.scrollLeft,
+          y: canvasContainerRef.current.scrollTop,
+        });
+      }
+      return;
+    }
+
     const coords = getCanvasCoordinates(e);
     if (!coords) return;
 
@@ -554,6 +588,14 @@ export const Canvas = ({
       return;
     }
 
+    if (selectedTool === "colorReplace") {
+      // Start drawing mode for color replace brush
+      setIsDrawing(true);
+      isDrawingRef.current = true;
+      await replaceColorAtPixel(x, y);
+      return;
+    }
+
     if (selectedTool === "line" || selectedTool === "rectangle" || selectedTool === "circle") {
       setStartPos({ x, y });
       setIsDrawing(true);
@@ -578,6 +620,24 @@ export const Canvas = ({
   };
 
   const handleMouseMove = async (e: React.MouseEvent<HTMLCanvasElement>) => {
+    // Handle panning - only if space is actually pressed
+    if (isPanning && panStart && isSpacePressed) {
+      const deltaX = e.clientX - panStart.x;
+      const deltaY = e.clientY - panStart.y;
+
+      if (canvasContainerRef.current) {
+        canvasContainerRef.current.scrollLeft = scrollOffset.x - deltaX;
+        canvasContainerRef.current.scrollTop = scrollOffset.y - deltaY;
+      }
+      return;
+    }
+
+    // Safety: reset panning state if space is not pressed
+    if (isPanning && !isSpacePressed) {
+      setIsPanning(false);
+      setPanStart(null);
+    }
+
     const coords = getCanvasCoordinates(e);
     if (!coords) return;
 
@@ -630,10 +690,29 @@ export const Canvas = ({
       return;
     }
 
+    if (selectedTool === "colorReplace") {
+      await replaceColorAtPixel(x, y);
+      return;
+    }
+
     await drawPixel(x, y);
   };
 
   const handleMouseUp = async (e: React.MouseEvent<HTMLCanvasElement>) => {
+    // Handle panning end
+    if (isPanning) {
+      setIsPanning(false);
+      setPanStart(null);
+      // Save the current scroll position
+      if (canvasContainerRef.current) {
+        setScrollOffset({
+          x: canvasContainerRef.current.scrollLeft,
+          y: canvasContainerRef.current.scrollTop,
+        });
+      }
+      return;
+    }
+
     if (!isDrawing) return;
 
     // Stop drawing immediately to prevent further batch additions
@@ -817,12 +896,63 @@ export const Canvas = ({
             x,
             y,
           });
+        } else if (selectedTool === "colorReplace") {
+          await invoke("draw_pencil", {
+            projectId,
+            x,
+            y,
+            color: replaceToColor,
+          });
         }
       }
     } catch (error) {
       console.error("Failed to flush draw batch:", error);
       // Re-render from backend if batch fails
       await renderCanvas();
+    }
+  };
+
+  // Helper to convert RGB to hex
+  const rgbToHex = (r: number, g: number, b: number): string => {
+    return '#' + [r, g, b].map(x => {
+      const hex = x.toString(16);
+      return hex.length === 1 ? '0' + hex : hex;
+    }).join('');
+  };
+
+  // Color replace brush - replaces pixels of specific color with immediate visual feedback
+  const replaceColorAtPixel = async (x: number, y: number) => {
+    // Check bounds
+    if (x < 0 || x >= width || y < 0 || y >= height) {
+      return;
+    }
+
+    // Get the active layer canvas for immediate drawing
+    const layerCanvas = layerCanvasesRef.current.get(activeLayerId);
+    if (!layerCanvas) return;
+
+    const ctx = layerCanvas.getContext("2d");
+    if (!ctx) return;
+
+    try {
+      // Get the color at the current pixel directly from canvas (fast!)
+      const imageData = ctx.getImageData(x, y, 1, 1);
+      const [r, g, b, a] = imageData.data;
+
+      // Convert to hex for comparison
+      const currentColor = rgbToHex(r, g, b);
+
+      // Only replace if the current pixel matches the "from" color and is not transparent
+      if (a > 0 && currentColor.toLowerCase() === replaceFromColor.toLowerCase()) {
+        // Draw immediately on canvas for instant feedback
+        ctx.fillStyle = replaceToColor;
+        ctx.fillRect(x, y, 1, 1);
+
+        // Add to batch for backend update (async)
+        drawBatchRef.current.push({ x, y });
+      }
+    } catch (error) {
+      console.error("Failed to replace color at pixel:", error);
     }
   };
 
@@ -1137,6 +1267,18 @@ export const Canvas = ({
       ),
       shortcut: "M",
     },
+    {
+      id: "colorReplace",
+      label: "Color Replace",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+          <path d="M12 2a10 10 0 1 0 10 10H12V2Z" />
+          <path d="M12 12 2 2" />
+          <path d="M12 12l10 10" />
+        </svg>
+      ),
+      shortcut: "H",
+    },
   ];
 
   // Undo/Redo handlers
@@ -1222,6 +1364,13 @@ export const Canvas = ({
         return;
       }
 
+      // Space key for temporary pan tool (only if not in an input field)
+      if (key === " " && !isSpacePressed && e.target === document.body) {
+        e.preventDefault();
+        setIsSpacePressed(true);
+        return;
+      }
+
       // Alt key for temporary eyedropper
       if (e.altKey && !isAltPressed) {
         setIsAltPressed(true);
@@ -1229,6 +1378,16 @@ export const Canvas = ({
           setPreviousTool(selectedTool);
           setSelectedTool("eyedropper");
         }
+        return;
+      }
+
+      // Save: Ctrl+S (Windows/Linux) or Cmd+S (Mac)
+      if ((e.ctrlKey || e.metaKey) && key === "s") {
+        e.preventDefault();
+        console.log("Save triggered");
+        invoke("save_canvas", { projectId })
+          .then(() => console.log("Canvas saved successfully"))
+          .catch((error) => console.error("Failed to save canvas:", error));
         return;
       }
 
@@ -1262,6 +1421,15 @@ export const Canvas = ({
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+
+      // Space key released - disable pan mode
+      if (key === " " && isSpacePressed) {
+        setIsSpacePressed(false);
+        setIsPanning(false);
+        setPanStart(null);
+      }
+
       // Alt key released - restore previous tool
       if (!e.altKey && isAltPressed) {
         setIsAltPressed(false);
@@ -1272,104 +1440,663 @@ export const Canvas = ({
       }
     };
 
+    const handleWindowBlur = () => {
+      // Reset space key state when window loses focus
+      setIsSpacePressed(false);
+      setIsPanning(false);
+      setPanStart(null);
+    };
+
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleWindowBlur);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", handleWindowBlur);
     };
-  }, [projectId, isAltPressed, selectedTool, previousTool]);
+  }, [projectId, isAltPressed, isSpacePressed, selectedTool, previousTool]);
+
+  // Sidebar visibility state
+  const [showColorPanel, setShowColorPanel] = useState(true);
+  const [showLayerPanel, setShowLayerPanel] = useState(true);
+
+  // Dropdown menu states
+  const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
 
   return (
     <div className="h-screen flex flex-col bg-[#3e323b] font-mono text-[#d6d2ca]">
-      {/* Top Menu Bar */}
-      <div className="h-8 bg-[#c8b79e] text-[#1d1d1d] flex items-center px-2 text-xs border-b border-[#1a1a1a]">
-        <button
-          onClick={onBack}
-          className="px-2 py-1 hover:bg-[#b0a68e] transition-colors"
-        >
-          ← Back
-        </button>
-        <div className="mx-2 w-px h-4 bg-[#1a1a1a]" />
-        <button className="px-2 py-1 hover:bg-[#b0a68e] transition-colors">
-          File
-        </button>
-        <button className="px-2 py-1 hover:bg-[#b0a68e] transition-colors">
-          Edit
-        </button>
-        <button className="px-2 py-1 hover:bg-[#b0a68e] transition-colors">
-          View
-        </button>
-        <label className="px-2 py-1 hover:bg-[#b0a68e] transition-colors cursor-pointer">
-          Reference
-          <input
-            type="file"
-            accept="image/*"
-            onChange={handleReferenceUpload}
-            className="hidden"
-          />
-        </label>
-        <button className="px-2 py-1 hover:bg-[#b0a68e] transition-colors">
-          Sprite
-        </button>
+      {/* Top Header Container */}
+      <div className="bg-[#c8b79e] text-[#1d1d1d] border-b-2 border-[#1a1a1a] shadow-md">
+        {/* Primary Menu Bar */}
+        <div className="h-10 flex items-center px-4 text-xs border-b border-[#1a1a1a]">
+          <button
+            onClick={onBack}
+            className="flex items-center gap-2 px-3 py-1.5 hover:bg-[#b0a68e] transition-colors rounded"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+              <path d="M19 12H5M12 19l-7-7 7-7" />
+            </svg>
+            Back
+          </button>
+          <div className="mx-3 w-px h-5 bg-[#1a1a1a]" />
+
+        {/* View toggles */}
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setShowColorPanel(!showColorPanel)}
+            className={`px-3 py-1.5 hover:bg-[#b0a68e] transition-colors rounded ${!showColorPanel ? 'bg-[#b0a68e]' : ''}`}
+            title="Toggle Color Panel"
+          >
+            Colors
+          </button>
+          <button
+            onClick={() => setShowLayerPanel(!showLayerPanel)}
+            className={`px-3 py-1.5 hover:bg-[#b0a68e] transition-colors rounded ${!showLayerPanel ? 'bg-[#b0a68e]' : ''}`}
+            title="Toggle Layer Panel"
+          >
+            Layers
+          </button>
+        </div>
+
+        <div className="mx-3 w-px h-5 bg-[#1a1a1a]" />
+
+        {/* File Dropdown */}
+        <div className="relative">
+          <button
+            onClick={() => setActiveDropdown(activeDropdown === "file" ? null : "file")}
+            className="px-3 py-1.5 hover:bg-[#b0a68e] transition-colors rounded flex items-center gap-1"
+          >
+            File
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+          {activeDropdown === "file" && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setActiveDropdown(null)} />
+              <div className="absolute left-0 top-full mt-1 bg-[#2b2b2b] border-2 border-[#1a1a1a] rounded shadow-lg z-50 min-w-[220px] overflow-hidden"
+                style={{ boxShadow: "0 4px 8px rgba(0,0,0,0.3)" }}>
+                <button
+                  onClick={async () => {
+                    setActiveDropdown(null);
+                    try {
+                      await invoke("save_canvas", { projectId });
+                      console.log("Canvas saved successfully");
+                    } catch (error) {
+                      console.error("Failed to save canvas:", error);
+                    }
+                  }}
+                  className="w-full px-4 py-3 text-left text-sm hover:bg-[#505050] transition-all flex items-center gap-3 border-b border-[#1a1a1a]"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5 text-[#d6d2ca]">
+                    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                    <polyline points="17 21 17 13 7 13 7 21" />
+                    <polyline points="7 3 7 8 15 8" />
+                  </svg>
+                  <div className="flex flex-col">
+                    <span className="text-[#d6d2ca] font-medium">Save</span>
+                    <span className="text-[9px] text-[#9b978e] uppercase tracking-wider">Ctrl+S</span>
+                  </div>
+                </button>
+                <button
+                  onClick={async () => {
+                    setActiveDropdown(null);
+                    try {
+                      const data: number[] = await invoke("get_canvas_data", { projectId });
+                      const canvas = document.createElement("canvas");
+                      canvas.width = width;
+                      canvas.height = height;
+                      const ctx = canvas.getContext("2d");
+                      if (ctx) {
+                        const imageData = ctx.createImageData(width, height);
+                        const uint8Data = new Uint8ClampedArray(data);
+                        imageData.data.set(uint8Data);
+                        ctx.putImageData(imageData, 0, 0);
+
+                        canvas.toBlob((blob) => {
+                          if (blob) {
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url;
+                            a.download = `${projectName}.png`;
+                            a.click();
+                            URL.revokeObjectURL(url);
+                          }
+                        });
+                      }
+                    } catch (error) {
+                      console.error("Failed to export:", error);
+                    }
+                  }}
+                  className="w-full px-4 py-3 text-left text-sm hover:bg-[#505050] transition-all flex items-center gap-3 border-b border-[#1a1a1a]"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5 text-[#d6d2ca]">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
+                  <span className="text-[#d6d2ca] font-medium">Export as PNG</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveDropdown(null);
+                    onBack();
+                  }}
+                  className="w-full px-4 py-3 text-left text-sm hover:bg-[#505050] transition-all flex items-center gap-3"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5 text-[#d6d2ca]">
+                    <path d="M18 6L6 18M6 6l12 12" />
+                  </svg>
+                  <span className="text-[#d6d2ca] font-medium">Close Project</span>
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Edit Dropdown */}
+        <div className="relative">
+          <button
+            onClick={() => setActiveDropdown(activeDropdown === "edit" ? null : "edit")}
+            className="px-3 py-1.5 hover:bg-[#b0a68e] transition-colors rounded flex items-center gap-1"
+          >
+            Edit
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+          {activeDropdown === "edit" && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setActiveDropdown(null)} />
+              <div className="absolute left-0 top-full mt-1 bg-[#2b2b2b] border-2 border-[#1a1a1a] rounded shadow-lg z-50 min-w-[220px] overflow-hidden"
+                style={{ boxShadow: "0 4px 8px rgba(0,0,0,0.3)" }}>
+                <button
+                  onClick={() => {
+                    setActiveDropdown(null);
+                    handleUndo();
+                  }}
+                  className="w-full px-4 py-3 text-left text-sm hover:bg-[#505050] transition-all flex items-center gap-3 border-b border-[#1a1a1a]"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5 text-[#d6d2ca]">
+                    <path d="M3 7v6h6" />
+                    <path d="M21 17a9 9 0 00-9-9 9 9 0 00-6 2.3L3 13" />
+                  </svg>
+                  <div className="flex flex-col">
+                    <span className="text-[#d6d2ca] font-medium">Undo</span>
+                    <span className="text-[9px] text-[#9b978e] uppercase tracking-wider">Ctrl+Z</span>
+                  </div>
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveDropdown(null);
+                    handleRedo();
+                  }}
+                  className="w-full px-4 py-3 text-left text-sm hover:bg-[#505050] transition-all flex items-center gap-3 border-b border-[#1a1a1a]"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5 text-[#d6d2ca]">
+                    <path d="M21 7v6h-6" />
+                    <path d="M3 17a9 9 0 019-9 9 9 0 016 2.3l3 2.7" />
+                  </svg>
+                  <div className="flex flex-col">
+                    <span className="text-[#d6d2ca] font-medium">Redo</span>
+                    <span className="text-[9px] text-[#9b978e] uppercase tracking-wider">Ctrl+Y</span>
+                  </div>
+                </button>
+                <button
+                  onClick={async () => {
+                    setActiveDropdown(null);
+                    try {
+                      await invoke("clear_canvas", { projectId });
+                      await renderCanvas();
+                    } catch (error) {
+                      console.error("Failed to clear canvas:", error);
+                    }
+                  }}
+                  className="w-full px-4 py-3 text-left text-sm hover:bg-[#505050] transition-all flex items-center gap-3"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5 text-[#d6d2ca]">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                  </svg>
+                  <span className="text-[#d6d2ca] font-medium">Clear Canvas</span>
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Reference Dropdown */}
+        <div className="relative">
+          <button
+            onClick={() => setActiveDropdown(activeDropdown === "reference" ? null : "reference")}
+            className="px-3 py-1.5 hover:bg-[#b0a68e] transition-colors rounded flex items-center gap-1"
+          >
+            Reference
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+          {activeDropdown === "reference" && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setActiveDropdown(null)} />
+              <div className="absolute left-0 top-full mt-1 bg-[#2b2b2b] border-2 border-[#1a1a1a] rounded shadow-lg z-50 min-w-[220px] overflow-hidden"
+                style={{ boxShadow: "0 4px 8px rgba(0,0,0,0.3)" }}>
+                <label className="w-full px-4 py-3 text-left text-sm hover:bg-[#505050] transition-all flex items-center gap-3 cursor-pointer border-b border-[#1a1a1a]">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5 text-[#d6d2ca]">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <polyline points="21 15 16 10 5 21" />
+                  </svg>
+                  <span className="text-[#d6d2ca] font-medium">Load Reference Image</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => {
+                      handleReferenceUpload(e);
+                      setActiveDropdown(null);
+                    }}
+                    className="hidden"
+                  />
+                </label>
+                {referenceImage && (
+                  <>
+                    <button
+                      onClick={() => {
+                        setActiveDropdown(null);
+                        setShowReference(!showReference);
+                      }}
+                      className="w-full px-4 py-3 text-left text-sm hover:bg-[#505050] transition-all flex items-center gap-3 border-b border-[#1a1a1a]"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5 text-[#d6d2ca]">
+                        {showReference ? (
+                          <>
+                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                            <circle cx="12" cy="12" r="3" />
+                          </>
+                        ) : (
+                          <>
+                            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                            <line x1="1" y1="1" x2="23" y2="23" />
+                          </>
+                        )}
+                      </svg>
+                      <span className="text-[#d6d2ca] font-medium">{showReference ? "Hide Reference" : "Show Reference"}</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setActiveDropdown(null);
+                        clearReferenceImage();
+                      }}
+                      className="w-full px-4 py-3 text-left text-sm hover:bg-[#505050] transition-all flex items-center gap-3"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5 text-[#d6d2ca]">
+                        <path d="M18 6L6 18M6 6l12 12" />
+                      </svg>
+                      <span className="text-[#d6d2ca] font-medium">Clear Reference</span>
+                    </button>
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
         <div className="flex-1" />
+
+        {/* Undo/Redo buttons */}
+        <div className="flex items-center gap-1">
+          <button
+            onClick={handleUndo}
+            className="p-2 hover:bg-[#b0a68e] transition-colors rounded"
+            title="Undo (Ctrl+Z)"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+              <path d="M3 7v6h6" />
+              <path d="M21 17a9 9 0 00-9-9 9 9 0 00-6 2.3L3 13" />
+            </svg>
+          </button>
+          <button
+            onClick={handleRedo}
+            className="p-2 hover:bg-[#b0a68e] transition-colors rounded"
+            title="Redo (Ctrl+Y)"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+              <path d="M21 7v6h-6" />
+              <path d="M3 17a9 9 0 019-9 9 9 0 016 2.3l3 2.7" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="mx-3 w-px h-5 bg-[#1a1a1a]" />
         <button
           onClick={() => setShowCheatsheet(!showCheatsheet)}
-          className="px-2 py-1 hover:bg-[#b0a68e] transition-colors"
+          className="p-2 hover:bg-[#b0a68e] transition-colors rounded"
           title="Keyboard Shortcuts (?)"
         >
-          ?
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
         </button>
-        <div className="mx-2 w-px h-4 bg-[#1a1a1a]" />
-        <span className="px-2 text-[#5a5349]">{projectName}</span>
+        <div className="mx-3 w-px h-5 bg-[#1a1a1a]" />
+        <span className="px-3 text-[#5a5349] font-semibold">{projectName}</span>
+        </div>
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar - Color Palette */}
-        <div className="w-64 bg-[#2b2b2b] border-r border-[#1a1a1a] flex flex-col overflow-hidden">
-          {/* Palette Section */}
-          <div className="p-3 border-b border-[#1a1a1a]">
-            <div className="text-[10px] text-[#9b978e] uppercase tracking-wider mb-2 font-mono">
-              Palette
+      <div className="flex-1 flex overflow-hidden relative">
+          {/* Left Sidebar - Color Palette (Collapsible) */}
+          <div className={`bg-[#2b2b2b] border-r border-[#1a1a1a] flex flex-col overflow-hidden transition-all duration-300 ease-in-out shadow-lg ${showColorPanel ? 'w-72' : 'w-0'}`}>
+          {showColorPanel && (
+            <>
+              {/* Palette Section */}
+              <div className="p-4 border-b border-[#1a1a1a]">
+                <div className="text-xs text-[#9b978e] uppercase tracking-wider mb-3 font-mono font-bold">
+                  Palette
+                </div>
+                <div className="bg-[#1d1d1d] border border-[#1a1a1a] p-2 rounded-lg">
+                  <div className="grid grid-cols-6 gap-1">
+                    {colorPalette.map((color, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => setSelectedColor(color)}
+                        className={`w-9 h-9 border-2 transition-all rounded ${
+                          selectedColor === color
+                            ? "border-[#8aa7ff] ring-2 ring-[#8aa7ff] ring-offset-2 ring-offset-[#1d1d1d] scale-110 shadow-lg"
+                            : "border-[#1a1a1a] hover:border-[#505050] hover:scale-105"
+                        }`}
+                        style={{ backgroundColor: color }}
+                        title={color}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Color Picker Section */}
+              <div className="flex-1 overflow-y-auto p-4">
+                <div className="text-xs text-[#9b978e] uppercase tracking-wider mb-3 font-mono font-bold">
+                  Color Picker
+                </div>
+                <ColorPicker
+                  color={selectedColor}
+                  onChange={setSelectedColor}
+                  onAddToPalette={handleAddToPalette}
+                />
+              </div>
+            </>
+          )}
+        </div>
+
+          {/* Center Canvas Area - Maximized space */}
+        <div
+          className="flex-1 flex flex-col bg-[#4d404f] overflow-auto relative"
+          onWheel={handleWheel}
+        >
+          {/* Secondary Toolbar - Horizontal bar at top of canvas */}
+          <div className="h-16 bg-[#b0a68e] border-b border-[#1a1a1a] flex items-center px-4 gap-4 shadow-lg">
+            {/* Brush/Tool Size */}
+            <div className="flex items-center gap-2">
+              <span className="text-[#1d1d1d] text-xs uppercase tracking-wider font-semibold">Size</span>
+              <input
+                type="number"
+                min="1"
+                value={brushSize}
+                onChange={(e) => setBrushSize(Math.max(1, parseInt(e.target.value) || 1))}
+                className="w-20 h-10 px-3 text-sm border bg-[#c8b79e] border-[#8a7d6e] text-[#1d1d1d] focus:border-[#5a5349] focus:outline-none focus:ring-1 focus:ring-[#5a5349] transition-all"
+                title="Brush Size"
+              />
             </div>
-            <div className="bg-[#1d1d1d] border border-[#1a1a1a] p-1.5">
-              <div className="grid grid-cols-6 gap-0.5">
-                {colorPalette.map((color, idx) => (
+
+            <div className="h-10 w-px bg-[#8a7d6e]" />
+
+            {/* Canvas Info */}
+            <div className="flex items-center gap-2">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5 text-[#1d1d1d]">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+              </svg>
+              <div className="text-[#1d1d1d] text-sm font-mono font-semibold">
+                {width}×{height}
+              </div>
+            </div>
+
+            <div className="h-10 w-px bg-[#8a7d6e]" />
+
+            {/* Zoom */}
+            <div className="flex items-center gap-2">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5 text-[#1d1d1d]">
+                <circle cx="11" cy="11" r="8" />
+                <path d="M21 21l-4.35-4.35" />
+              </svg>
+              <div className="text-[#1d1d1d] text-sm font-mono font-semibold">
+                {zoom}%
+              </div>
+            </div>
+
+            {/* Shape Fill */}
+            {(selectedTool === "rectangle" || selectedTool === "circle") && (
+              <>
+                <div className="h-10 w-px bg-[#8a7d6e]" />
+                <div className="flex items-center gap-2">
+                  <span className="text-[#1d1d1d] text-xs uppercase tracking-wider font-semibold">Fill</span>
                   <button
-                    key={idx}
-                    onClick={() => setSelectedColor(color)}
-                    className={`w-8 h-8 border transition-all ${
-                      selectedColor === color
-                        ? "border-[#8aa7ff] ring-2 ring-[#8aa7ff] ring-inset scale-95"
-                        : "border-[#1a1a1a] hover:border-[#505050]"
+                    onClick={() => setShapeFilled(!shapeFilled)}
+                    className={`w-10 h-10 text-lg border transition-all ${
+                      shapeFilled
+                        ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] font-bold"
+                        : "bg-[#1d1d1d] border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040]"
                     }`}
-                    style={{ backgroundColor: color }}
-                    title={color}
+                  >
+                    {shapeFilled ? "■" : "□"}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Symmetry */}
+            {(selectedTool === "pencil" || selectedTool === "eraser") && (
+              <>
+                <div className="h-10 w-px bg-[#8a7d6e]" />
+                <div className="flex items-center gap-2">
+                  <span className="text-[#1d1d1d] text-xs uppercase tracking-wider font-semibold">Symmetry</span>
+                  <button
+                    onClick={() =>
+                      setSymmetryMode((prev) => ({
+                        ...prev,
+                        horizontal: !prev.horizontal,
+                      }))
+                    }
+                    className={`w-10 h-10 text-lg border transition-all ${
+                      symmetryMode.horizontal
+                        ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] font-bold"
+                        : "bg-[#1d1d1d] border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040]"
+                    }`}
+                    title="Horizontal Symmetry"
+                  >
+                    ↔
+                  </button>
+                  <button
+                    onClick={() =>
+                      setSymmetryMode((prev) => ({
+                        ...prev,
+                        vertical: !prev.vertical,
+                      }))
+                    }
+                    className={`w-10 h-10 text-lg border transition-all ${
+                      symmetryMode.vertical
+                        ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] font-bold"
+                        : "bg-[#1d1d1d] border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040]"
+                    }`}
+                    title="Vertical Symmetry"
+                  >
+                    ↕
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Color Replace Options */}
+            {selectedTool === "colorReplace" && (
+              <>
+                <div className="h-10 w-px bg-[#8a7d6e]" />
+                <div className="flex items-center gap-2">
+                  <span className="text-[#1d1d1d] text-xs uppercase tracking-wider font-semibold">From</span>
+                  <input
+                    type="color"
+                    value={replaceFromColor}
+                    onChange={(e) => setReplaceFromColor(e.target.value)}
+                    className="w-12 h-10 border border-[#8a7d6e] cursor-pointer"
+                    title="Color to replace"
                   />
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[#1d1d1d] text-xs uppercase tracking-wider font-semibold">To</span>
+                  <input
+                    type="color"
+                    value={replaceToColor}
+                    onChange={(e) => setReplaceToColor(e.target.value)}
+                    className="w-12 h-10 border border-[#8a7d6e] cursor-pointer"
+                    title="Replacement color"
+                  />
+                </div>
+              </>
+            )}
+
+            {/* Tool Display */}
+            <div className="ml-auto flex items-center gap-2 bg-[#1d1d1d] border border-[#1a1a1a] px-3 py-2">
+              {tools.find(t => t.id === selectedTool)?.icon}
+              <span className="text-[#d6d2ca] text-sm font-mono capitalize">
+                {selectedTool === "colorReplace" ? "Color Replace" : selectedTool}
+              </span>
+            </div>
+          </div>
+
+          {/* Canvas Content Area */}
+          <div
+            ref={canvasContainerRef}
+            className="flex-1 flex items-center justify-center p-8 overflow-auto [&::-webkit-scrollbar]:hidden"
+            style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+          >
+          {/* Floating Tool Palette - Left side of canvas */}
+          <div className="absolute left-6 top-1/2 -translate-y-1/2 z-10">
+            <div className="bg-[#2b2b2b] border border-[#1a1a1a] rounded-lg shadow-2xl overflow-hidden">
+              {/* Tool buttons */}
+              <div className="p-2 space-y-1">
+                {tools.map((tool) => (
+                  <button
+                    key={tool.id}
+                    onClick={() => setSelectedTool(tool.id)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      // Only show context menu for pencil tool
+                      if (tool.id === "pencil") {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        setToolContextMenu({
+                          visible: true,
+                          x: rect.right + 10,
+                          y: rect.top,
+                          tool: tool.id,
+                        });
+                      }
+                    }}
+                    className={`w-12 h-12 border flex items-center justify-center transition-all rounded ${
+                      selectedTool === tool.id
+                        ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] shadow-lg scale-110"
+                        : "bg-[#1d1d1d] border-[#1a1a1a] hover:bg-[#404040] hover:scale-105 text-[#d6d2ca]"
+                    }`}
+                    title={`${tool.label} (${tool.shortcut})`}
+                  >
+                    {tool.icon}
+                  </button>
                 ))}
+              </div>
+
+              {/* Tool Options - Context aware */}
+              <div className="border-t border-[#1a1a1a] p-3 bg-[#1d1d1d]">
+                <div className="text-[9px] text-[#9b978e] uppercase tracking-wider mb-2">
+                  Options
+                </div>
+
+                {/* Filled Toggle - for rectangle and circle */}
+                {(selectedTool === "rectangle" || selectedTool === "circle") && (
+                  <div className="mb-3">
+                    <div className="text-[8px] text-[#9b978e] mb-1.5">Fill</div>
+                    <div className="grid grid-cols-2 gap-1">
+                      <button
+                        onClick={() => setShapeFilled(false)}
+                        className={`px-2 py-1.5 text-[9px] border transition-all rounded ${
+                          !shapeFilled
+                            ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] font-bold"
+                            : "bg-[#2b2b2b] border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040]"
+                        }`}
+                      >
+                        Outline
+                      </button>
+                      <button
+                        onClick={() => setShapeFilled(true)}
+                        className={`px-2 py-1.5 text-[9px] border transition-all rounded ${
+                          shapeFilled
+                            ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] font-bold"
+                            : "bg-[#2b2b2b] border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040]"
+                        }`}
+                      >
+                        Filled
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Symmetry Mode */}
+                {(selectedTool === "pencil" || selectedTool === "eraser") && (
+                  <div>
+                    <div className="text-[8px] text-[#9b978e] mb-1.5">Symmetry</div>
+                    <div className="space-y-1">
+                      <button
+                        onClick={() =>
+                          setSymmetryMode((prev) => ({
+                            ...prev,
+                            horizontal: !prev.horizontal,
+                          }))
+                        }
+                        className={`w-full px-2 py-1.5 text-[9px] border transition-all rounded ${
+                          symmetryMode.horizontal
+                            ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] font-bold"
+                            : "bg-[#2b2b2b] border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040]"
+                        }`}
+                      >
+                        ↔ H
+                      </button>
+                      <button
+                        onClick={() =>
+                          setSymmetryMode((prev) => ({
+                            ...prev,
+                            vertical: !prev.vertical,
+                          }))
+                        }
+                        className={`w-full px-2 py-1.5 text-[9px] border transition-all rounded ${
+                          symmetryMode.vertical
+                            ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] font-bold"
+                            : "bg-[#2b2b2b] border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040]"
+                        }`}
+                      >
+                        ↕ V
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Current color indicator */}
+              <div className="border-t border-[#1a1a1a] p-2">
+                <div
+                  className="w-full h-8 border-2 border-[#1a1a1a] rounded"
+                  style={{ backgroundColor: selectedColor }}
+                  title={selectedColor}
+                />
               </div>
             </div>
           </div>
-
-          {/* Color Picker Section */}
-          <div className="flex-1 overflow-y-auto p-3">
-            <div className="text-[10px] text-[#9b978e] uppercase tracking-wider mb-2 font-mono">
-              Color Picker
-            </div>
-            <ColorPicker
-              color={selectedColor}
-              onChange={setSelectedColor}
-              onAddToPalette={handleAddToPalette}
-            />
-          </div>
-        </div>
-
-        {/* Center Canvas Area */}
-        <div
-          className="flex-1 flex flex-col items-center justify-center bg-[#4d404f] p-4 overflow-auto"
-          onWheel={handleWheel}
-        >
           <div className="relative">
             {/* Reference Image Overlay */}
             {referenceImage && showReference && (
@@ -1447,209 +2174,80 @@ export const Canvas = ({
                   50% / ${(zoom / 100) * 16}px ${(zoom / 100) * 16}px
                 `,
                 cursor:
-                  isAltPressed || selectedTool === "eyedropper"
+                  isSpacePressed
+                    ? isPanning
+                      ? "grabbing"
+                      : "grab"
+                    : selectedTool === "colorReplace"
+                    ? "cell"
+                    : isAltPressed || selectedTool === "eyedropper"
                     ? "crosshair"
                     : `url("data:image/svg+xml,%3Csvg width='32' height='32' xmlns='http://www.w3.org/2000/svg'%3E%3Cg stroke='white' stroke-width='5' stroke-linecap='square'%3E%3Cline x1='16' y1='3' x2='16' y2='11'/%3E%3Cline x1='16' y1='21' x2='16' y2='29'/%3E%3Cline x1='3' y1='16' x2='11' y2='16'/%3E%3Cline x1='21' y1='16' x2='29' y2='16'/%3E%3C/g%3E%3Cg stroke='black' stroke-width='2' stroke-linecap='square'%3E%3Cline x1='16' y1='3' x2='16' y2='11'/%3E%3Cline x1='16' y1='21' x2='16' y2='29'/%3E%3Cline x1='3' y1='16' x2='11' y2='16'/%3E%3Cline x1='21' y1='16' x2='29' y2='16'/%3E%3C/g%3E%3C/svg%3E") 16 16, crosshair`,
               }}
             />
           </div>
 
-          {/* Zoom Controls */}
-          <div className="mt-4 bg-[#2b2b2b] border border-[#1a1a1a] px-3 py-2 rounded flex flex-col gap-2 w-64">
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-[#9b978e] w-16">
-                Zoom: {zoom}%
-              </span>
-              <input
-                type="range"
-                min="100"
-                max="3200"
-                step="100"
-                value={zoom}
-                onChange={(e) => setZoom(Number(e.target.value))}
-                className="flex-1 h-2 bg-[#1d1d1d] rounded-lg appearance-none cursor-pointer"
-                style={{
-                  accentColor: "#8aa7ff",
-                }}
-              />
-            </div>
-          </div>
-
-          {/* Reference Image Controls */}
+          {/* Floating Canvas Controls - Bottom center */}
           {referenceImage && (
-            <div className="mt-2 bg-[#2b2b2b] border border-[#1a1a1a] px-3 py-2 rounded flex flex-col gap-2 w-64">
-              <div className="flex items-center justify-between">
+            <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10 flex gap-3">
+            {/* Reference Image Controls */}
+              <div className="bg-[#2b2b2b] border border-[#1a1a1a] px-4 py-2 rounded-lg shadow-2xl flex items-center gap-3">
                 <span className="text-xs text-[#9b978e]">Reference</span>
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => setShowReference(!showReference)}
-                    className="px-2 py-0.5 text-[9px] bg-[#1d1d1d] border border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040] transition-all"
-                  >
-                    {showReference ? "Hide" : "Show"}
-                  </button>
-                  <button
-                    onClick={clearReferenceImage}
-                    className="px-2 py-0.5 text-[9px] bg-[#1d1d1d] border border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040] transition-all"
-                  >
-                    Clear
-                  </button>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-[#9b978e] w-16">
-                  Opacity: {referenceOpacity}%
-                </span>
+                <button
+                  onClick={() => setShowReference(!showReference)}
+                  className={`px-3 py-1 text-[9px] border transition-all rounded ${
+                    showReference
+                      ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] font-bold"
+                      : "bg-[#1d1d1d] border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040]"
+                  }`}
+                >
+                  {showReference ? "Visible" : "Hidden"}
+                </button>
                 <input
                   type="range"
                   min="0"
                   max="100"
                   value={referenceOpacity}
                   onChange={(e) => setReferenceOpacity(Number(e.target.value))}
-                  className="flex-1 h-2 bg-[#1d1d1d] rounded-lg appearance-none cursor-pointer"
+                  className="w-24 h-2 bg-[#1d1d1d] rounded-lg appearance-none cursor-pointer"
                   style={{
                     accentColor: "#8aa7ff",
                   }}
                 />
+                <span className="text-xs text-[#9b978e] w-8 text-right">{referenceOpacity}%</span>
+                <button
+                  onClick={clearReferenceImage}
+                  className="w-8 h-8 flex items-center justify-center hover:bg-[#ff4444] hover:border-[#ff4444] transition-all rounded"
+                  title="Clear Reference"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+                    <path d="M18 6L6 18M6 6l12 12" />
+                  </svg>
+                </button>
               </div>
             </div>
           )}
-        </div>
-
-        {/* Right Sidebar - Tools and Options */}
-        <div className="w-64 bg-[#2b2b2b] border-l border-[#1a1a1a] flex flex-col overflow-hidden">
-          {/* Tool Options Section */}
-          <div className="p-3 border-b border-[#1a1a1a]">
-            <div className="text-[10px] text-[#9b978e] uppercase tracking-wider mb-3 font-mono">
-              Tool Options
-            </div>
-
-            {/* Brush Size - for pencil and eraser */}
-            {(selectedTool === "pencil" || selectedTool === "eraser") && (
-              <div className="mb-3">
-                <div className="text-[9px] text-[#9b978e] mb-1.5">Brush Size</div>
-                <div className="flex gap-1">
-                  {[1, 2, 3, 4].map((size) => (
-                    <button
-                      key={size}
-                      onClick={() => setBrushSize(size)}
-                      className={`flex-1 px-2 py-1.5 text-[10px] border transition-all ${
-                        brushSize === size
-                          ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d]"
-                          : "bg-[#1d1d1d] border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040]"
-                      }`}
-                    >
-                      {size}x{size}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Filled Toggle - for rectangle and circle */}
-            {(selectedTool === "rectangle" || selectedTool === "circle") && (
-              <div className="mb-3">
-                <div className="text-[9px] text-[#9b978e] mb-1.5">Fill Mode</div>
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => setShapeFilled(false)}
-                    className={`flex-1 px-2 py-1.5 text-[10px] border transition-all ${
-                      !shapeFilled
-                        ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d]"
-                        : "bg-[#1d1d1d] border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040]"
-                    }`}
-                  >
-                    Outline
-                  </button>
-                  <button
-                    onClick={() => setShapeFilled(true)}
-                    className={`flex-1 px-2 py-1.5 text-[10px] border transition-all ${
-                      shapeFilled
-                        ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d]"
-                        : "bg-[#1d1d1d] border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040]"
-                    }`}
-                  >
-                    Filled
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Symmetry Mode */}
-            <div>
-              <div className="text-[9px] text-[#9b978e] mb-1.5">Symmetry</div>
-              <div className="flex flex-col gap-1">
-                <button
-                  onClick={() =>
-                    setSymmetryMode((prev) => ({
-                      ...prev,
-                      horizontal: !prev.horizontal,
-                    }))
-                  }
-                  className={`w-full px-2 py-1.5 text-[10px] border transition-all ${
-                    symmetryMode.horizontal
-                      ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d]"
-                      : "bg-[#1d1d1d] border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040]"
-                  }`}
-                >
-                  Horizontal
-                </button>
-                <button
-                  onClick={() =>
-                    setSymmetryMode((prev) => ({
-                      ...prev,
-                      vertical: !prev.vertical,
-                    }))
-                  }
-                  className={`w-full px-2 py-1.5 text-[10px] border transition-all ${
-                    symmetryMode.vertical
-                      ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d]"
-                      : "bg-[#1d1d1d] border-[#1a1a1a] text-[#d6d2ca] hover:bg-[#404040]"
-                  }`}
-                >
-                  Vertical
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Tools Section */}
-          <div className="flex-1 overflow-y-auto p-3">
-            <div className="text-[10px] text-[#9b978e] uppercase tracking-wider mb-2 font-mono">
-              Tools
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              {tools.map((tool) => (
-                <button
-                  key={tool.id}
-                  onClick={() => setSelectedTool(tool.id)}
-                  className={`aspect-square border flex items-center justify-center transition-all ${
-                    selectedTool === tool.id
-                      ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] scale-105"
-                      : "bg-[#1d1d1d] border-[#1a1a1a] hover:bg-[#404040] text-[#d6d2ca]"
-                  }`}
-                  title={`${tool.label} (${tool.shortcut})`}
-                >
-                  {tool.icon}
-                </button>
-              ))}
-            </div>
           </div>
         </div>
 
-        {/* Layers Panel */}
-        <LayerPanel
-          layers={layers}
-          activeLayerId={activeLayerId}
-          onLayerSelect={setActiveLayerId}
-          onLayerAdd={handleLayerAdd}
-          onLayerDelete={handleLayerDelete}
-          onLayerDuplicate={handleLayerDuplicate}
-          onLayerReorder={handleLayerReorder}
-          onLayerToggleVisibility={handleLayerToggleVisibility}
-          onLayerOpacityChange={handleLayerOpacityChange}
-          onLayerBlendModeChange={handleLayerBlendModeChange}
-          onLayerRename={handleLayerRename}
-        />
+        {/* Layers Panel (Collapsible) */}
+        <div className={`bg-[#2b2b2b] border-l border-[#1a1a1a] flex flex-col overflow-hidden transition-all duration-300 ease-in-out shadow-lg ${showLayerPanel ? 'w-80' : 'w-0'}`}>
+          {showLayerPanel && (
+            <LayerPanel
+              layers={layers}
+              activeLayerId={activeLayerId}
+              onLayerSelect={setActiveLayerId}
+              onLayerAdd={handleLayerAdd}
+              onLayerDelete={handleLayerDelete}
+              onLayerDuplicate={handleLayerDuplicate}
+              onLayerReorder={handleLayerReorder}
+              onLayerToggleVisibility={handleLayerToggleVisibility}
+              onLayerOpacityChange={handleLayerOpacityChange}
+              onLayerBlendModeChange={handleLayerBlendModeChange}
+              onLayerRename={handleLayerRename}
+            />
+          )}
+        </div>
       </div>
 
       {/* Bottom Status Bar */}
@@ -1740,6 +2338,14 @@ export const Canvas = ({
                     <span className="text-[#9b978e]">Eyedropper (temp)</span>
                     <kbd className="bg-[#1d1d1d] px-2 py-0.5 rounded border border-[#1a1a1a]">Alt</kbd>
                   </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#9b978e]">Pan (temp)</span>
+                    <kbd className="bg-[#1d1d1d] px-2 py-0.5 rounded border border-[#1a1a1a]">Space</kbd>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#9b978e]">Color Replace</span>
+                    <kbd className="bg-[#1d1d1d] px-2 py-0.5 rounded border border-[#1a1a1a]">H</kbd>
+                  </div>
                 </div>
               </div>
 
@@ -1774,6 +2380,10 @@ export const Canvas = ({
                     <span className="text-[#9b978e]">Zoom In/Out</span>
                     <kbd className="bg-[#1d1d1d] px-2 py-0.5 rounded border border-[#1a1a1a]">Scroll</kbd>
                   </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#9b978e]">Pan Canvas</span>
+                    <kbd className="bg-[#1d1d1d] px-2 py-0.5 rounded border border-[#1a1a1a]">Space+Drag</kbd>
+                  </div>
                 </div>
               </div>
 
@@ -1798,6 +2408,34 @@ export const Canvas = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Tool Context Menu */}
+      {toolContextMenu?.visible && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setToolContextMenu(null)}
+          />
+          <div
+            className="fixed z-50 bg-[#2b2b2b] border border-[#1a1a1a] rounded-lg shadow-2xl overflow-hidden min-w-[180px]"
+            style={{
+              left: `${toolContextMenu.x}px`,
+              top: `${toolContextMenu.y}px`,
+            }}
+          >
+            <button
+              onClick={() => {
+                setSelectedTool("colorReplace");
+                setToolContextMenu(null);
+              }}
+              className="w-full px-4 py-3 text-left text-sm hover:bg-[#404040] transition-all flex items-center gap-3 text-[#d6d2ca]"
+            >
+              {tools.find(t => t.id === "colorReplace")?.icon}
+              <span>Color Replace</span>
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
