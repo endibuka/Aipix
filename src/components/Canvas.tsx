@@ -57,6 +57,14 @@ export const Canvas = ({
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   const webglRendererRef = useRef<WebGLRenderer | null>(null);
   const rafProcessorRef = useRef<RAFBatchProcessor>(new RAFBatchProcessor());
+  const renderLoopRef = useRef<number | null>(null);
+  const needsRenderRef = useRef<boolean>(false);
+  const lastThumbnailUpdateRef = useRef<number>(0);
+  const thumbnailUpdateIntervalRef = useRef<number>(500); // Update thumbnails max once per 500ms
+  const drawOperationCountRef = useRef<number>(0);
+  const dirtyLayersRef = useRef<Set<string>>(new Set());
+  const layerTexturesRef = useRef<Map<string, WebGLTexture>>(new Map());
+  const gpuDrawnLayersRef = useRef<Set<string>>(new Set()); // Track layers drawn with GPU
 
   // 3-color system with slots
   const [mainColor, setMainColor] = useState("#000000");
@@ -76,10 +84,14 @@ export const Canvas = ({
   };
 
   const [selectedTool, setSelectedTool] = useState<Tool>("pencil");
+  const [showSelectionTools, setShowSelectionTools] = useState(false);
+  const selectionToolsRef = useRef<HTMLDivElement>(null);
+  const selectionGroupButtonRef = useRef<HTMLButtonElement>(null);
 
   // Selection state
   const [selection, setSelection] = useState<Selection | null>(null);
   const [selectionMode] = useState<SelectionMode>("replace"); // TODO: Add UI to change mode
+  const lassoPointsRef = useRef<Array<{ x: number; y: number }>>([]);
   const [lassoPoints, setLassoPoints] = useState<Array<{ x: number; y: number }>>([]);
   const [magicWandTolerance] = useState<number>(32); // TODO: Add UI slider to adjust tolerance
 
@@ -159,10 +171,12 @@ export const Canvas = ({
   const [brushSizeAdjustStart, setBrushSizeAdjustStart] = useState<{ y: number; initialSize: number } | null>(null);
   const [showBrushSizeOverlay, setShowBrushSizeOverlay] = useState(false);
 
-  // Cursor position tracking
+  // Cursor position tracking (use ref to avoid re-renders)
+  const cursorPosRef = useRef<{ x: number; y: number } | null>(null);
   const [cursorPos, setCursorPos] = useState<{ x: number; y: number } | null>(null);
 
-  // Hover preview for pencil/eraser
+  // Hover preview for pencil/eraser (use ref to avoid re-renders)
+  const hoverPosRef = useRef<{ x: number; y: number } | null>(null);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
   const hoverCanvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -235,11 +249,18 @@ export const Canvas = ({
     setLayers((prev) => [...prev, newLayer]);
     setActiveLayerId(newLayer.id);
 
-    // Create canvas for new layer
+    // Initialize GPU texture for new layer
+    const renderer = webglRendererRef.current;
+    if (renderer) {
+      renderer.initializeLayerTexture(newLayer.id, width, height);
+    }
+
+    // Create canvas for new layer (still needed for some tools and fallback)
     const layerCanvas = document.createElement("canvas");
     layerCanvas.width = width;
     layerCanvas.height = height;
     layerCanvasesRef.current.set(newLayer.id, layerCanvas);
+    dirtyLayersRef.current.add(newLayer.id); // Mark as dirty for initial texture upload
   }, [layers, width, height]);
 
   const handleLayerDelete = useCallback((layerId: string) => {
@@ -256,6 +277,8 @@ export const Canvas = ({
 
     // Clean up layer canvas
     layerCanvasesRef.current.delete(layerId);
+    layerTexturesRef.current.delete(layerId);
+    dirtyLayersRef.current.delete(layerId);
     webglRendererRef.current?.clearTextureCache(layerId);
   }, [layers, activeLayerId]);
 
@@ -280,10 +303,20 @@ export const Canvas = ({
         ctx.drawImage(sourceCanvas, 0, 0);
       }
       layerCanvasesRef.current.set(newLayer.id, newCanvas);
+
+      // Initialize GPU texture with duplicated content
+      const renderer = webglRendererRef.current;
+      if (renderer) {
+        const imageData = ctx?.getImageData(0, 0, width, height);
+        if (imageData) {
+          renderer.uploadTexture(imageData.data, width, height, newLayer.id);
+        }
+      }
     }
 
     setLayers((prev) => [...prev, newLayer]);
     setActiveLayerId(newLayer.id);
+    dirtyLayersRef.current.add(newLayer.id);
   }, [layers, width, height]);
 
   const handleLayerReorder = useCallback((fromIndex: number, toIndex: number) => {
@@ -339,11 +372,33 @@ export const Canvas = ({
           }
         }
 
+        // Start continuous render loop for smooth, throttled rendering at 60 FPS
+        const startRenderLoop = () => {
+          const render = () => {
+            // Only render if something changed
+            if (needsRenderRef.current) {
+              needsRenderRef.current = false;
+              compositeLayersWebGL().catch(console.error);
+            }
+            renderLoopRef.current = requestAnimationFrame(render);
+          };
+          renderLoopRef.current = requestAnimationFrame(render);
+        };
+        startRenderLoop();
+
         // Create canvas for initial layer
         const initialCanvas = document.createElement("canvas");
         initialCanvas.width = width;
         initialCanvas.height = height;
         layerCanvasesRef.current.set("layer-1", initialCanvas);
+
+        // Initialize GPU texture for initial layer
+        const renderer = webglRendererRef.current;
+        if (renderer) {
+          renderer.initializeLayerTexture("layer-1", width, height);
+        }
+
+        dirtyLayersRef.current.add("layer-1"); // Mark as dirty for initial upload
 
         // Get canvas data and render
         await renderCanvas();
@@ -369,6 +424,9 @@ export const Canvas = ({
 
     // Cleanup on unmount
     return () => {
+      if (renderLoopRef.current) {
+        cancelAnimationFrame(renderLoopRef.current);
+      }
       webglRendererRef.current?.dispose();
       rafProcessorRef.current?.clear();
       if (flushTimerRef.current) {
@@ -376,6 +434,39 @@ export const Canvas = ({
       }
     };
   }, [projectId, width, height]);
+
+  // Handle click outside for selection tools popup
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        showSelectionTools &&
+        selectionToolsRef.current &&
+        !selectionToolsRef.current.contains(event.target as Node) &&
+        selectionGroupButtonRef.current &&
+        !selectionGroupButtonRef.current.contains(event.target as Node)
+      ) {
+        setShowSelectionTools(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showSelectionTools]);
+
+  // Mark that a render is needed (will be picked up by render loop)
+  // Throttled during drawing to reduce overhead
+  const scheduleRender = (immediate: boolean = false) => {
+    if (immediate || !isDrawingRef.current) {
+      // Always render immediately when not drawing
+      needsRenderRef.current = true;
+    } else {
+      // During drawing, only schedule render every few operations
+      drawOperationCountRef.current++;
+      if (drawOperationCountRef.current % 3 === 0) {
+        needsRenderRef.current = true;
+      }
+    }
+  };
 
   // Render canvas from Rust buffer with layers support
   const renderCanvas = async () => {
@@ -429,11 +520,30 @@ export const Canvas = ({
         const layerCanvas = layerCanvasesRef.current.get(layer.id);
         if (!layerCanvas) continue;
 
-        const ctx = layerCanvas.getContext("2d");
-        if (!ctx) continue;
+        // Check if layer texture needs updating
+        let texture = layerTexturesRef.current.get(layer.id);
+        const isDirty = dirtyLayersRef.current.has(layer.id);
+        const isGpuDrawn = gpuDrawnLayersRef.current.has(layer.id);
 
-        const imageData = ctx.getImageData(0, 0, width, height);
-        const texture = renderer.uploadTexture(imageData.data, width, height, layer.id);
+        if (!texture || (isDirty && !isGpuDrawn)) {
+          // Only read pixel data if layer is dirty AND not GPU-drawn
+          // GPU-drawn layers already have their texture updated on GPU
+          const ctx = layerCanvas.getContext("2d", { willReadFrequently: true });
+          if (!ctx) continue;
+
+          const imageData = ctx.getImageData(0, 0, width, height);
+          texture = renderer.uploadTexture(imageData.data, width, height, layer.id);
+          layerTexturesRef.current.set(layer.id, texture);
+
+          // Clear dirty flag
+          dirtyLayersRef.current.delete(layer.id);
+        } else if (texture && isDirty && isGpuDrawn) {
+          // GPU-drawn layer - texture already updated, just clear dirty flag
+          dirtyLayersRef.current.delete(layer.id);
+        }
+
+        // Skip if no texture
+        if (!texture) continue;
 
         renderer.renderLayer(
           texture,
@@ -492,8 +602,18 @@ export const Canvas = ({
     updateLayerThumbnails();
   };
 
-  // Update layer thumbnails
+  // Update layer thumbnails (throttled to prevent excessive re-renders)
   const updateLayerThumbnails = () => {
+    const now = Date.now();
+    const timeSinceLastUpdate = now - lastThumbnailUpdateRef.current;
+
+    // Throttle thumbnail updates to max once per 500ms
+    if (timeSinceLastUpdate < thumbnailUpdateIntervalRef.current) {
+      return;
+    }
+
+    lastThumbnailUpdateRef.current = now;
+
     setLayers((prev) =>
       prev.map((layer) => {
         const layerCanvas = layerCanvasesRef.current.get(layer.id);
@@ -676,8 +796,9 @@ export const Canvas = ({
     }
 
     if (selectedTool === "selectLasso") {
-      // Start lasso selection
-      setLassoPoints([{ x, y }]);
+      // Start lasso selection (use ref to avoid re-renders)
+      lassoPointsRef.current = [{ x, y }];
+      setLassoPoints([{ x, y }]); // Update state once at start
       setIsDrawing(true);
       return;
     }
@@ -769,12 +890,12 @@ export const Canvas = ({
 
     const { x, y } = coords;
 
-    // Update cursor position for display
-    setCursorPos({ x, y });
+    // Update cursor position using ref to avoid re-renders
+    cursorPosRef.current = { x, y };
 
     // Update hover preview for pencil/eraser/dithering when not drawing
     if (!isDrawing && (selectedTool === "pencil" || selectedTool === "eraser" || selectedTool === "dithering")) {
-      setHoverPos({ x, y });
+      hoverPosRef.current = { x, y };
       drawHoverPreview(x, y);
     }
 
@@ -794,8 +915,10 @@ export const Canvas = ({
 
     // Selection tool previews
     if (selectedTool === "selectLasso" && isDrawing) {
-      // Add point to lasso
-      setLassoPoints((prev) => [...prev, { x, y }]);
+      // Add point to lasso using ref to avoid re-renders during drawing
+      lassoPointsRef.current.push({ x, y });
+      // Draw lasso preview directly without triggering React update
+      drawLassoPreview();
       return;
     }
 
@@ -869,6 +992,8 @@ export const Canvas = ({
     // Stop drawing immediately to prevent further batch additions
     setIsDrawing(false);
     isDrawingRef.current = false;
+    drawOperationCountRef.current = 0; // Reset counter
+    needsRenderRef.current = true; // Force final render
 
     const coords = getCanvasCoordinates(e);
     if (!coords) return;
@@ -960,13 +1085,15 @@ export const Canvas = ({
     } else if (selectedTool === "selectLasso" && lassoPoints.length > 2) {
       // Lasso selection - convert points to (i32, i32) tuples
       try {
-        const points = lassoPoints.map((p) => [p.x, p.y]);
+        // Use ref for final points to avoid state update during processing
+        const points = lassoPointsRef.current.map((p) => [p.x, p.y]);
         const result: Selection = await invoke("select_lasso", {
           projectId,
           points,
           mode: selectionMode,
         });
         setSelection(result);
+        lassoPointsRef.current = [];
         setLassoPoints([]);
       } catch (error) {
         console.error("Failed to create lasso selection:", error);
@@ -981,6 +1108,35 @@ export const Canvas = ({
   };
 
   // Dithering pattern functions
+  // Helper function to convert hex color to RGB with caching
+  const colorCacheRef = useRef<Map<string, { r: number; g: number; b: number }>>(new Map());
+
+  const hexToRgb = (hex: string): { r: number; g: number; b: number } => {
+    // Check cache first
+    const cached = colorCacheRef.current.get(hex);
+    if (cached) return cached;
+
+    // Parse color
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    const rgb = result
+      ? {
+          r: parseInt(result[1], 16),
+          g: parseInt(result[2], 16),
+          b: parseInt(result[3], 16),
+        }
+      : { r: 0, g: 0, b: 0 };
+
+    // Cache it
+    colorCacheRef.current.set(hex, rgb);
+    return rgb;
+  };
+
+  // Convert hex color to RGBA string format for GPU rendering
+  const hexToRgba = (hex: string, opacity: number = 1): string => {
+    const rgb = hexToRgb(hex);
+    return `rgba(${rgb.r},${rgb.g},${rgb.b},${opacity})`;
+  };
+
   const getDitheringValue = (x: number, y: number, pattern: DitheringPattern): boolean => {
     switch (pattern) {
       case "checkerboard":
@@ -1030,14 +1186,9 @@ export const Canvas = ({
   };
 
   const drawPixelImmediate = (x: number, y: number) => {
-    // Draw on the active layer canvas
-    const layerCanvas = layerCanvasesRef.current.get(activeLayerId);
-    if (!layerCanvas) return;
+    const renderer = webglRendererRef.current;
 
-    const ctx = layerCanvas.getContext("2d");
-    if (!ctx) return;
-
-    // Helper function to draw a single pixel or brush stroke (optimized)
+    // Helper function to draw a single pixel or brush stroke (GPU-accelerated)
     const drawBrush = (centerX: number, centerY: number) => {
       const offset = Math.floor(brushSize / 2);
       const startX = Math.max(0, centerX - offset);
@@ -1051,24 +1202,107 @@ export const Canvas = ({
       if (brushWidth <= 0 || brushHeight <= 0) return;
 
       if (selectedTool === "pencil") {
-        // Use single fillRect for entire brush area (much faster!)
-        ctx.fillStyle = selectedColor;
-        ctx.fillRect(startX, startY, brushWidth, brushHeight);
+        // Try GPU-accelerated drawing first, fallback to CPU
+        if (renderer) {
+          const rgbaColor = hexToRgba(selectedColor, colorOpacity / 100);
+          renderer.drawBrushToLayer(
+            activeLayerId,
+            startX,
+            startY,
+            brushWidth,
+            brushHeight,
+            rgbaColor,
+            width,
+            height
+          );
+          gpuDrawnLayersRef.current.add(activeLayerId);
+        } else {
+          // Fallback to CPU canvas drawing when WebGL not available
+          const layerCanvas = layerCanvasesRef.current.get(activeLayerId);
+          if (layerCanvas) {
+            const ctx = layerCanvas.getContext("2d");
+            if (ctx) {
+              ctx.fillStyle = selectedColor;
+              ctx.globalAlpha = colorOpacity / 100;
+              ctx.fillRect(startX, startY, brushWidth, brushHeight);
+              ctx.globalAlpha = 1.0;
+              gpuDrawnLayersRef.current.delete(activeLayerId);
+            }
+          }
+        }
       } else if (selectedTool === "eraser") {
-        // Use single clearRect for entire brush area
-        ctx.clearRect(startX, startY, brushWidth, brushHeight);
+        // Try GPU-accelerated eraser first, fallback to CPU
+        if (renderer) {
+          renderer.drawBrushToLayer(
+            activeLayerId,
+            startX,
+            startY,
+            brushWidth,
+            brushHeight,
+            "rgba(0,0,0,0)", // Transparent
+            width,
+            height
+          );
+          gpuDrawnLayersRef.current.add(activeLayerId);
+        } else {
+          // Fallback to CPU canvas eraser when WebGL not available
+          const layerCanvas = layerCanvasesRef.current.get(activeLayerId);
+          if (layerCanvas) {
+            const ctx = layerCanvas.getContext("2d");
+            if (ctx) {
+              ctx.clearRect(startX, startY, brushWidth, brushHeight);
+              gpuDrawnLayersRef.current.delete(activeLayerId);
+            }
+          }
+        }
       } else if (selectedTool === "dithering") {
-        // Dithering: draw pixels based on pattern with main and secondary colors
-        ctx.fillStyle = mainColor;
-        for (let py = startY; py <= endY; py++) {
-          for (let px = startX; px <= endX; px++) {
-            const useMainColor = getDitheringValue(px, py, ditheringPattern);
-            ctx.fillStyle = useMainColor ? mainColor : secondaryColor;
-            ctx.fillRect(px, py, 1, 1);
+        // For dithering, fall back to CPU canvas (needs per-pixel logic)
+        const layerCanvas = layerCanvasesRef.current.get(activeLayerId);
+        if (!layerCanvas) return;
+        const ctx = layerCanvas.getContext("2d");
+        if (!ctx) return;
+
+        // Remove from GPU-drawn set since we're using CPU
+        gpuDrawnLayersRef.current.delete(activeLayerId);
+
+        // Dithering: Optimized using ImageData for large brushes
+        if (brushWidth * brushHeight > 16) {
+          // Use ImageData for better performance with large brushes
+          const imageData = ctx.getImageData(startX, startY, brushWidth, brushHeight);
+          const data = imageData.data;
+
+          // Parse colors once
+          const mainRgb = hexToRgb(mainColor);
+          const secondaryRgb = hexToRgb(secondaryColor);
+
+          for (let py = 0; py < brushHeight; py++) {
+            for (let px = 0; px < brushWidth; px++) {
+              const useMainColor = getDitheringValue(startX + px, startY + py, ditheringPattern);
+              const color = useMainColor ? mainRgb : secondaryRgb;
+              const idx = (py * brushWidth + px) * 4;
+              data[idx] = color.r;
+              data[idx + 1] = color.g;
+              data[idx + 2] = color.b;
+              data[idx + 3] = 255; // Full opacity
+            }
+          }
+
+          ctx.putImageData(imageData, startX, startY);
+        } else {
+          // Use fillRect for small brushes (still faster for tiny areas)
+          for (let py = startY; py <= endY; py++) {
+            for (let px = startX; px <= endX; px++) {
+              const useMainColor = getDitheringValue(px, py, ditheringPattern);
+              ctx.fillStyle = useMainColor ? mainColor : secondaryColor;
+              ctx.fillRect(px, py, 1, 1);
+            }
           }
         }
       }
     };
+
+    // Mark active layer as dirty for efficient texture updates
+    dirtyLayersRef.current.add(activeLayerId);
 
     // Draw at primary position
     drawBrush(x, y);
@@ -1089,6 +1323,9 @@ export const Canvas = ({
       const mirrorY = height - 1 - y;
       drawBrush(mirrorX, mirrorY);
     }
+
+    // Schedule render to show GPU drawing
+    scheduleRender();
   };
 
   const scheduleFlush = () => {
@@ -1314,10 +1551,10 @@ export const Canvas = ({
     lastPosRef.current = { x, y };
 
     // Schedule batch flush using RAF for optimal performance
+    // Mark that we need a render after flushing
     rafProcessorRef.current.addToBatch(async () => {
       await flushDrawBatch();
-      // Composite layers after drawing
-      await compositeLayersWebGL();
+      scheduleRender();
     });
   };
 
@@ -1504,6 +1741,22 @@ export const Canvas = ({
     ctx.setLineDash([]);
   };
 
+  const drawLassoPreview = () => {
+    // Draw lasso path preview on the main canvas without triggering React re-render
+    // This will be overwritten by the next render, which is fine for a preview
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const points = lassoPointsRef.current;
+    if (points.length < 2) return;
+
+    // Redraw the canvas composited layers first
+    scheduleRender();
+  };
+
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     e.preventDefault();
 
@@ -1516,7 +1769,70 @@ export const Canvas = ({
     }
   };
 
-  const tools: { id: Tool; label: string; icon: JSX.Element; shortcut: string }[] = [
+  // Selection tools grouped separately
+  const selectionTools: { id: Tool; label: string; icon: JSX.Element; shortcut: string }[] = [
+    {
+      id: "select",
+      label: "Rectangle Select",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+          <path d="M5 3a2 2 0 0 0-2 2" />
+          <path d="M19 3a2 2 0 0 1 2 2" />
+          <path d="M21 19a2 2 0 0 1-2 2" />
+          <path d="M5 21a2 2 0 0 1-2-2" />
+          <path d="M9 3h1" />
+          <path d="M9 21h1" />
+          <path d="M14 3h1" />
+          <path d="M14 21h1" />
+          <path d="M3 9v1" />
+          <path d="M21 9v1" />
+          <path d="M3 14v1" />
+          <path d="M21 14v1" />
+        </svg>
+      ),
+      shortcut: "M",
+    },
+    {
+      id: "selectEllipse",
+      label: "Ellipse Select",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+          <ellipse cx="12" cy="12" rx="9" ry="6" strokeDasharray="2 2" />
+        </svg>
+      ),
+      shortcut: "O",
+    },
+    {
+      id: "selectLasso",
+      label: "Lasso Select",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+          <path d="M3 12c0-4.5 3-7 7-7s6 2.5 8 6c1 2 1 4 0 6-2 3.5-4 6-8 6s-7-2.5-7-7" strokeDasharray="2 2" />
+        </svg>
+      ),
+      shortcut: "W",
+    },
+    {
+      id: "selectWand",
+      label: "Magic Wand",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+          <path d="M15 4V2" />
+          <path d="M15 16v-2" />
+          <path d="M8 9h2" />
+          <path d="M20 9h2" />
+          <path d="M17.8 11.8 19 13" />
+          <path d="M15 9h0" />
+          <path d="M17.8 6.2 19 5" />
+          <path d="m3 21 9-9" />
+          <path d="M12.2 6.2 11 5" />
+        </svg>
+      ),
+      shortcut: "W",
+    },
+  ];
+
+  const tools: { id: Tool | 'selectionGroup'; label: string; icon: JSX.Element; shortcut: string; isGroup?: boolean }[] = [
     {
       id: "pencil",
       label: "Pencil",
@@ -1596,9 +1912,10 @@ export const Canvas = ({
       shortcut: "C",
     },
     {
-      id: "select",
-      label: "Rectangle Select",
-      icon: (
+      id: "selectionGroup",
+      label: "Selection Tools",
+      isGroup: true,
+      icon: selectionTools.find(t => t.id === selectedTool)?.icon || (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
           <path d="M5 3a2 2 0 0 0-2 2" />
           <path d="M19 3a2 2 0 0 1 2 2" />
@@ -1615,44 +1932,6 @@ export const Canvas = ({
         </svg>
       ),
       shortcut: "M",
-    },
-    {
-      id: "selectEllipse",
-      label: "Ellipse Select",
-      icon: (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
-          <ellipse cx="12" cy="12" rx="9" ry="6" strokeDasharray="2 2" />
-        </svg>
-      ),
-      shortcut: "O",
-    },
-    {
-      id: "selectLasso",
-      label: "Lasso Select",
-      icon: (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
-          <path d="M3 12c0-4.5 3-7 7-7s6 2.5 8 6c1 2 1 4 0 6-2 3.5-4 6-8 6s-7-2.5-7-7" strokeDasharray="2 2" />
-        </svg>
-      ),
-      shortcut: "W",
-    },
-    {
-      id: "selectWand",
-      label: "Magic Wand",
-      icon: (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
-          <path d="M15 4V2" />
-          <path d="M15 16v-2" />
-          <path d="M8 9h2" />
-          <path d="M20 9h2" />
-          <path d="M17.8 11.8 19 13" />
-          <path d="M15 9h0" />
-          <path d="M17.8 6.2 19 5" />
-          <path d="m3 21 9-9" />
-          <path d="M12.2 6.2 11 5" />
-        </svg>
-      ),
-      shortcut: "W",
     },
     {
       id: "colorReplace",
@@ -2535,35 +2814,82 @@ export const Canvas = ({
           >
           {/* Floating Tool Palette - Left side of canvas */}
           <div className="absolute left-6 top-1/2 -translate-y-1/2 z-10">
-            <div className="bg-[#2b2b2b] border border-[#1a1a1a] rounded-lg shadow-2xl overflow-hidden">
+            <div className="bg-[#2b2b2b] border border-[#1a1a1a] rounded-lg shadow-2xl overflow-visible">
               {/* Tool buttons */}
               <div className="p-2 space-y-1">
                 {tools.map((tool) => (
-                  <button
-                    key={tool.id}
-                    onClick={() => setSelectedTool(tool.id)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      // Only show context menu for pencil tool
-                      if (tool.id === "pencil") {
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        setToolContextMenu({
-                          visible: true,
-                          x: rect.right + 10,
-                          y: rect.top,
-                          tool: tool.id,
-                        });
-                      }
-                    }}
-                    className={`w-12 h-12 border flex items-center justify-center transition-all rounded ${
-                      selectedTool === tool.id
-                        ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] shadow-lg scale-110"
-                        : "bg-[#1d1d1d] border-[#1a1a1a] hover:bg-[#404040] hover:scale-105 text-[#d6d2ca]"
-                    }`}
-                    title={`${tool.label} (${tool.shortcut})`}
-                  >
-                    {tool.icon}
-                  </button>
+                  <div key={tool.id} className="relative">
+                    <button
+                      ref={tool.isGroup ? selectionGroupButtonRef : null}
+                      onClick={() => {
+                        if (tool.isGroup) {
+                          console.log("Selection group clicked, current state:", showSelectionTools);
+                          setShowSelectionTools(!showSelectionTools);
+                        } else {
+                          setSelectedTool(tool.id as Tool);
+                        }
+                      }}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        // Only show context menu for pencil tool
+                        if (tool.id === "pencil") {
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          setToolContextMenu({
+                            visible: true,
+                            x: rect.right + 10,
+                            y: rect.top,
+                            tool: tool.id as Tool,
+                          });
+                        }
+                      }}
+                      className={`w-12 h-12 border flex items-center justify-center transition-all rounded ${
+                        tool.isGroup
+                          ? selectionTools.some(t => t.id === selectedTool)
+                            ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] shadow-lg scale-110"
+                            : "bg-[#1d1d1d] border-[#1a1a1a] hover:bg-[#404040] hover:scale-105 text-[#d6d2ca]"
+                          : selectedTool === tool.id
+                            ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] shadow-lg scale-110"
+                            : "bg-[#1d1d1d] border-[#1a1a1a] hover:bg-[#404040] hover:scale-105 text-[#d6d2ca]"
+                      }`}
+                      title={`${tool.label} (${tool.shortcut})`}
+                    >
+                      {tool.icon}
+                      {tool.isGroup && (
+                        <div className="absolute bottom-0.5 right-0.5 w-2 h-2">
+                          <svg viewBox="0 0 6 6" fill="currentColor" className="w-2 h-2">
+                            <polygon points="0,0 6,0 3,3" />
+                          </svg>
+                        </div>
+                      )}
+                    </button>
+
+                    {/* Selection tools popup */}
+                    {tool.isGroup && showSelectionTools && (
+                      <div
+                        ref={selectionToolsRef}
+                        className="absolute left-full ml-2 top-0 bg-[#2b2b2b] border border-[#1a1a1a] rounded-lg shadow-2xl p-1.5 flex gap-1 z-[60]"
+                        style={{ pointerEvents: 'auto' }}
+                      >
+                        {selectionTools.map((selTool) => (
+                          <button
+                            key={selTool.id}
+                            onClick={() => {
+                              setSelectedTool(selTool.id);
+                              setShowSelectionTools(false);
+                            }}
+                            className={`w-10 h-10 border flex items-center justify-center transition-all rounded ${
+                              selectedTool === selTool.id
+                                ? "bg-[#8aa7ff] border-[#8aa7ff] text-[#1d1d1d] shadow-lg"
+                                : "bg-[#1d1d1d] border-[#1a1a1a] hover:bg-[#404040] text-[#d6d2ca]"
+                            }`}
+                            title={`${selTool.label} (${selTool.shortcut})`}
+                          >
+                            {selTool.icon}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
 
