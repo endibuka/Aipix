@@ -4,9 +4,11 @@ interface ColorPickerProps {
   color: string;
   onChange: (color: string) => void;
   onAddToPalette?: (color: string) => void;
+  opacity?: number;
+  onOpacityChange?: (opacity: number) => void;
 }
 
-export const ColorPicker = ({ color, onChange, onAddToPalette }: ColorPickerProps) => {
+export const ColorPicker = ({ color, onChange, onAddToPalette, opacity = 100, onOpacityChange }: ColorPickerProps) => {
   const [hue, setHue] = useState(0);
   const [saturation, setSaturation] = useState(100);
   const [value, setValue] = useState(100);
@@ -14,6 +16,7 @@ export const ColorPicker = ({ color, onChange, onAddToPalette }: ColorPickerProp
 
   const svPickerRef = useRef<HTMLDivElement>(null);
   const hueSliderRef = useRef<HTMLDivElement>(null);
+  const opacitySliderRef = useRef<HTMLDivElement>(null);
 
   // Convert hex to HSV
   useEffect(() => {
@@ -149,12 +152,12 @@ export const ColorPicker = ({ color, onChange, onAddToPalette }: ColorPickerProp
     document.addEventListener("mouseup", handleMouseUp);
   };
 
-  // Handle hue slider interaction
+  // Handle hue slider interaction (horizontal)
   const handleHueChange = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!hueSliderRef.current) return;
     const rect = hueSliderRef.current.getBoundingClientRect();
-    const y = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
-    const newHue = (y / rect.height) * 360;
+    const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+    const newHue = (x / rect.width) * 360;
 
     setHue(newHue);
     const newColor = hsvToHex(newHue, saturation, value);
@@ -167,8 +170,8 @@ export const ColorPicker = ({ color, onChange, onAddToPalette }: ColorPickerProp
     const handleMouseMove = (e: MouseEvent) => {
       if (!hueSliderRef.current) return;
       const rect = hueSliderRef.current.getBoundingClientRect();
-      const y = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
-      const newHue = (y / rect.height) * 360;
+      const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+      const newHue = (x / rect.width) * 360;
 
       setHue(newHue);
       const newColor = hsvToHex(newHue, saturation, value);
@@ -192,6 +195,35 @@ export const ColorPicker = ({ color, onChange, onAddToPalette }: ColorPickerProp
     onChange(newColor);
   };
 
+  // Handle opacity slider interaction
+  const handleOpacityChange = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!opacitySliderRef.current || !onOpacityChange) return;
+    const rect = opacitySliderRef.current.getBoundingClientRect();
+    const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+    const newOpacity = (x / rect.width) * 100;
+    onOpacityChange(newOpacity);
+  };
+
+  const handleOpacityMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    handleOpacityChange(e);
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!opacitySliderRef.current || !onOpacityChange) return;
+      const rect = opacitySliderRef.current.getBoundingClientRect();
+      const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+      const newOpacity = (x / rect.width) * 100;
+      onOpacityChange(newOpacity);
+    };
+
+    const handleMouseUp = () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+  };
+
   // Get current hue color
   const hueColor = hsvToHex(hue, 100, 100);
 
@@ -211,13 +243,13 @@ export const ColorPicker = ({ color, onChange, onAddToPalette }: ColorPickerProp
         />
       </div>
 
-      {/* Main SV Picker + Hue Slider */}
-      <div className="flex gap-2">
+      {/* Main SV Picker */}
+      <div className="bg-[#1d1d1d] border border-[#1a1a1a] p-2">
         {/* Saturation-Value Picker */}
         <div
           ref={svPickerRef}
           onMouseDown={handleSVMouseDown}
-          className="relative w-[160px] h-[160px] border border-[#1a1a1a] cursor-crosshair"
+          className="relative w-full aspect-square border border-[#505050] cursor-crosshair"
           style={{
             background: `
               linear-gradient(to top, #000, transparent),
@@ -227,7 +259,7 @@ export const ColorPicker = ({ color, onChange, onAddToPalette }: ColorPickerProp
         >
           {/* Picker cursor */}
           <div
-            className="absolute w-2.5 h-2.5 border-2 border-white rounded-full pointer-events-none"
+            className="absolute w-3 h-3 border-2 border-white rounded-full pointer-events-none"
             style={{
               left: `${saturation}%`,
               top: `${100 - value}%`,
@@ -236,15 +268,20 @@ export const ColorPicker = ({ color, onChange, onAddToPalette }: ColorPickerProp
             }}
           />
         </div>
+      </div>
 
-        {/* Hue Slider */}
+      {/* Hue Slider - Horizontal */}
+      <div className="bg-[#1d1d1d] border border-[#1a1a1a] p-2">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-[10px] text-[#9b978e] uppercase tracking-wider font-mono font-bold">Hue</span>
+        </div>
         <div
           ref={hueSliderRef}
           onMouseDown={handleHueMouseDown}
-          className="relative w-[24px] h-[160px] border border-[#1a1a1a] cursor-pointer"
+          className="relative w-full h-[20px] border border-[#505050] cursor-pointer"
           style={{
             background: `
-              linear-gradient(to bottom,
+              linear-gradient(to right,
                 #ff0000 0%,
                 #ffff00 16.66%,
                 #00ff00 33.33%,
@@ -258,14 +295,44 @@ export const ColorPicker = ({ color, onChange, onAddToPalette }: ColorPickerProp
         >
           {/* Hue cursor */}
           <div
-            className="absolute left-0 right-0 h-0.5 bg-white pointer-events-none border-t border-b border-black"
+            className="absolute top-0 bottom-0 w-0.5 bg-white pointer-events-none border-l border-r border-black"
             style={{
-              top: `${(hue / 360) * 100}%`,
-              transform: "translateY(-50%)",
+              left: `${(hue / 360) * 100}%`,
+              transform: "translateX(-50%)",
             }}
           />
         </div>
       </div>
+
+      {/* Opacity Slider */}
+      {onOpacityChange && (
+        <div className="bg-[#1d1d1d] border border-[#1a1a1a] p-2">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[10px] text-[#9b978e] uppercase tracking-wider font-mono font-bold">Opacity</span>
+            <span className="text-[10px] text-[#d6d2ca] font-mono ml-auto">{Math.round(opacity)}%</span>
+          </div>
+          <div
+            ref={opacitySliderRef}
+            onMouseDown={handleOpacityMouseDown}
+            className="relative w-full h-[20px] border border-[#505050] cursor-pointer"
+            style={{
+              background: `
+                linear-gradient(to right, transparent, ${color}),
+                repeating-conic-gradient(#808080 0% 25%, #606060 0% 50%) 50% / 8px 8px
+              `,
+            }}
+          >
+            {/* Opacity cursor */}
+            <div
+              className="absolute top-0 bottom-0 w-0.5 bg-white pointer-events-none border-l border-r border-black"
+              style={{
+                left: `${opacity}%`,
+                transform: "translateX(-50%)",
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* RGB Sliders */}
       <div className="space-y-2 bg-[#1d1d1d] border border-[#1a1a1a] p-2">

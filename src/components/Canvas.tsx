@@ -35,7 +35,23 @@ export const Canvas = ({
   const webglRendererRef = useRef<WebGLRenderer | null>(null);
   const rafProcessorRef = useRef<RAFBatchProcessor>(new RAFBatchProcessor());
 
-  const [selectedColor, setSelectedColor] = useState("#000000");
+  // 3-color system with slots
+  const [mainColor, setMainColor] = useState("#000000");
+  const [secondaryColor, setSecondaryColor] = useState("#ffffff");
+  const [backgroundColor, setBackgroundColor] = useState("#808080");
+  const [activeColorSlot, setActiveColorSlot] = useState<"main" | "secondary" | "background">("main");
+  const [colorOpacity, setColorOpacity] = useState(100); // 0-100
+
+  // Helper to get the currently selected color based on active slot
+  const selectedColor = activeColorSlot === "main" ? mainColor : activeColorSlot === "secondary" ? secondaryColor : backgroundColor;
+
+  // Helper to set the currently active color
+  const setSelectedColor = (color: string) => {
+    if (activeColorSlot === "main") setMainColor(color);
+    else if (activeColorSlot === "secondary") setSecondaryColor(color);
+    else setBackgroundColor(color);
+  };
+
   const [selectedTool, setSelectedTool] = useState<Tool>("pencil");
 
   // Layer management
@@ -105,6 +121,11 @@ export const Canvas = ({
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState<{ x: number; y: number } | null>(null);
   const [scrollOffset, setScrollOffset] = useState({ x: 0, y: 0 });
+
+  // Shift key for brush size adjustment
+  const [isShiftPressed, setIsShiftPressed] = useState(false);
+  const [brushSizeAdjustStart, setBrushSizeAdjustStart] = useState<{ y: number; initialSize: number } | null>(null);
+  const [showBrushSizeOverlay, setShowBrushSizeOverlay] = useState(false);
 
   // Cursor position tracking
   const [cursorPos, setCursorPos] = useState<{ x: number; y: number } | null>(null);
@@ -625,6 +646,29 @@ export const Canvas = ({
   };
 
   const handleMouseMove = async (e: React.MouseEvent<HTMLCanvasElement>) => {
+    // Check if Shift is actually pressed (in case key event was missed)
+    if (!e.shiftKey && isShiftPressed) {
+      setIsShiftPressed(false);
+      setShowBrushSizeOverlay(false);
+      setBrushSizeAdjustStart(null);
+    }
+
+    // Handle brush size adjustment with Shift key
+    if (isShiftPressed && (selectedTool === "pencil" || selectedTool === "eraser")) {
+      if (!brushSizeAdjustStart) {
+        // Initialize brush size adjustment
+        setBrushSizeAdjustStart({ y: e.clientY, initialSize: brushSize });
+      } else {
+        // Calculate new brush size based on vertical mouse movement
+        // Moving up increases size, moving down decreases size
+        const deltaY = brushSizeAdjustStart.y - e.clientY;
+        const sensitivity = 0.1; // Adjust this to change how sensitive the adjustment is
+        const newSize = Math.max(1, Math.min(50, Math.round(brushSizeAdjustStart.initialSize + deltaY * sensitivity)));
+        setBrushSize(newSize);
+      }
+      return;
+    }
+
     // Handle panning - only if space is actually pressed
     if (isPanning && panStart && isSpacePressed) {
       const deltaX = e.clientX - panStart.x;
@@ -1403,6 +1447,15 @@ export const Canvas = ({
     }
   }, [brushSize, symmetryMode, selectedColor, selectedTool, hoverPos]);
 
+  // Hide brush size overlay when switching away from pencil/eraser
+  useEffect(() => {
+    if (selectedTool !== "pencil" && selectedTool !== "eraser") {
+      setShowBrushSizeOverlay(false);
+      setIsShiftPressed(false);
+      setBrushSizeAdjustStart(null);
+    }
+  }, [selectedTool]);
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1439,6 +1492,13 @@ export const Canvas = ({
         return;
       }
 
+      // Shift key for brush size adjustment (only for pencil/eraser)
+      if (e.shiftKey && !isShiftPressed && (selectedTool === "pencil" || selectedTool === "eraser")) {
+        setIsShiftPressed(true);
+        setShowBrushSizeOverlay(true); // Show overlay immediately when Shift is pressed
+        return;
+      }
+
       // Save: Ctrl+S (Windows/Linux) or Cmd+S (Mac)
       if ((e.ctrlKey || e.metaKey) && key === "s") {
         e.preventDefault();
@@ -1466,6 +1526,25 @@ export const Canvas = ({
         console.log("Redo triggered");
         handleRedo();
         return;
+      }
+
+      // Color slot shortcuts (1, 2, 3)
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (key === "1") {
+          e.preventDefault();
+          setActiveColorSlot("main");
+          return;
+        }
+        if (key === "2") {
+          e.preventDefault();
+          setActiveColorSlot("secondary");
+          return;
+        }
+        if (key === "3") {
+          e.preventDefault();
+          setActiveColorSlot("background");
+          return;
+        }
       }
 
       // Tool shortcuts (don't trigger if Ctrl/Cmd is pressed)
@@ -1496,13 +1575,24 @@ export const Canvas = ({
           setPreviousTool(null);
         }
       }
+
+      // Shift key released - disable brush size adjustment
+      if (!e.shiftKey && isShiftPressed) {
+        setIsShiftPressed(false);
+        setShowBrushSizeOverlay(false);
+        setBrushSizeAdjustStart(null);
+      }
     };
 
     const handleWindowBlur = () => {
-      // Reset space key state when window loses focus
+      // Reset all key states when window loses focus
       setIsSpacePressed(false);
       setIsPanning(false);
       setPanStart(null);
+      setIsShiftPressed(false);
+      setShowBrushSizeOverlay(false);
+      setBrushSizeAdjustStart(null);
+      setIsAltPressed(false);
     };
 
     window.addEventListener("keydown", handleKeyDown);
@@ -1513,7 +1603,7 @@ export const Canvas = ({
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", handleWindowBlur);
     };
-  }, [projectId, isAltPressed, isSpacePressed, selectedTool, previousTool]);
+  }, [projectId, isAltPressed, isSpacePressed, isShiftPressed, selectedTool, previousTool]);
 
   // Sidebar visibility state
   const [showColorPanel, setShowColorPanel] = useState(true);
@@ -1847,8 +1937,8 @@ export const Canvas = ({
           {/* Left Sidebar - Color Palette (Collapsible) */}
           <div className={`bg-[#2b2b2b] border-r border-[#1a1a1a] flex flex-col overflow-hidden transition-all duration-300 ease-in-out shadow-lg ${showColorPanel ? 'w-72' : 'w-0'}`}>
           {showColorPanel && (
-            <>
-              {/* Palette Section */}
+            <div className="flex flex-col h-full">
+              {/* Palette Section - Top */}
               <div className="p-4 border-b border-[#1a1a1a]">
                 <div className="text-xs text-[#9b978e] uppercase tracking-wider mb-3 font-mono font-bold">
                   Palette
@@ -1872,18 +1962,28 @@ export const Canvas = ({
                 </div>
               </div>
 
-              {/* Color Picker Section */}
-              <div className="flex-1 overflow-y-auto p-4">
-                <div className="text-xs text-[#9b978e] uppercase tracking-wider mb-3 font-mono font-bold">
-                  Color Picker
+              {/* Spacer */}
+              <div className="flex-1" />
+
+              {/* Color Picker Section - Bottom */}
+              <div className="p-4 border-t border-[#1a1a1a]">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-xs text-[#9b978e] uppercase tracking-wider font-mono font-bold">
+                    Color Picker
+                  </div>
+                  <div className="text-[10px] text-[#8aa7ff] font-mono font-bold">
+                    {activeColorSlot === "main" ? "MAIN (1)" : activeColorSlot === "secondary" ? "SEC (2)" : "BG (3)"}
+                  </div>
                 </div>
                 <ColorPicker
                   color={selectedColor}
                   onChange={setSelectedColor}
                   onAddToPalette={handleAddToPalette}
+                  opacity={colorOpacity}
+                  onOpacityChange={setColorOpacity}
                 />
               </div>
-            </>
+            </div>
           )}
         </div>
 
@@ -2145,13 +2245,55 @@ export const Canvas = ({
                 )}
               </div>
 
-              {/* Current color indicator */}
+              {/* 3-Color Swatches */}
               <div className="border-t border-[#1a1a1a] p-2">
-                <div
-                  className="w-full h-8 border-2 border-[#1a1a1a] rounded"
-                  style={{ backgroundColor: selectedColor }}
-                  title={selectedColor}
-                />
+                <div className="text-[8px] text-[#9b978e] uppercase tracking-wider mb-2 text-center">Colors</div>
+                <div className="space-y-1">
+                  {/* Main Color */}
+                  <button
+                    onClick={() => setActiveColorSlot("main")}
+                    className={`w-full h-10 border-2 transition-all rounded flex items-center justify-between px-2 ${
+                      activeColorSlot === "main"
+                        ? "border-[#8aa7ff] ring-2 ring-[#8aa7ff] ring-offset-2 ring-offset-[#2b2b2b] shadow-lg"
+                        : "border-[#1a1a1a] hover:border-[#505050]"
+                    }`}
+                    style={{ backgroundColor: mainColor }}
+                    title={`Main Color (1): ${mainColor}`}
+                  >
+                    <span className="text-[9px] font-bold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">MAIN</span>
+                    <span className="text-[8px] font-bold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">1</span>
+                  </button>
+
+                  {/* Secondary Color */}
+                  <button
+                    onClick={() => setActiveColorSlot("secondary")}
+                    className={`w-full h-10 border-2 transition-all rounded flex items-center justify-between px-2 ${
+                      activeColorSlot === "secondary"
+                        ? "border-[#8aa7ff] ring-2 ring-[#8aa7ff] ring-offset-2 ring-offset-[#2b2b2b] shadow-lg"
+                        : "border-[#1a1a1a] hover:border-[#505050]"
+                    }`}
+                    style={{ backgroundColor: secondaryColor }}
+                    title={`Secondary Color (2): ${secondaryColor}`}
+                  >
+                    <span className="text-[9px] font-bold text-black drop-shadow-[0_1px_2px_rgba(255,255,255,0.8)]">SEC</span>
+                    <span className="text-[8px] font-bold text-black drop-shadow-[0_1px_2px_rgba(255,255,255,0.8)]">2</span>
+                  </button>
+
+                  {/* Background Color */}
+                  <button
+                    onClick={() => setActiveColorSlot("background")}
+                    className={`w-full h-10 border-2 transition-all rounded flex items-center justify-between px-2 ${
+                      activeColorSlot === "background"
+                        ? "border-[#8aa7ff] ring-2 ring-[#8aa7ff] ring-offset-2 ring-offset-[#2b2b2b] shadow-lg"
+                        : "border-[#1a1a1a] hover:border-[#505050]"
+                    }`}
+                    style={{ backgroundColor: backgroundColor }}
+                    title={`Background Color (3): ${backgroundColor}`}
+                  >
+                    <span className="text-[9px] font-bold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">BG</span>
+                    <span className="text-[8px] font-bold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">3</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -2244,6 +2386,31 @@ export const Canvas = ({
               }}
             />
           </div>
+
+          {/* Brush Size Overlay - Ctrl+Drag */}
+          {showBrushSizeOverlay && (selectedTool === "pencil" || selectedTool === "eraser") && (
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 pointer-events-none">
+              <div className="bg-[#2b2b2b]/95 border-2 border-[#8aa7ff] px-6 py-4 rounded-lg shadow-2xl">
+                <div className="text-center mb-3">
+                  <div className="text-[10px] text-[#9b978e] uppercase tracking-wider mb-1">Brush Size</div>
+                  <div className="text-3xl font-bold text-[#8aa7ff] font-mono">{brushSize}</div>
+                </div>
+                <div className="flex items-center gap-3">
+                  {/* Visual slider */}
+                  <div className="relative w-48 h-2 bg-[#1d1d1d] border border-[#1a1a1a] rounded-full overflow-hidden">
+                    <div
+                      className="absolute left-0 top-0 h-full bg-gradient-to-r from-[#8aa7ff] to-[#5a7fff] transition-all"
+                      style={{ width: `${Math.min((brushSize / 50) * 100, 100)}%` }}
+                    />
+                  </div>
+                  <div className="text-[10px] text-[#9b978e]">
+                    <div>↑ Increase</div>
+                    <div>↓ Decrease</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Floating Canvas Controls - Bottom center */}
           {referenceImage && (
@@ -2428,6 +2595,27 @@ export const Canvas = ({
                 </div>
               </div>
 
+              {/* Colors */}
+              <div>
+                <h3 className="text-sm font-bold text-[#8aa7ff] mb-2 uppercase tracking-wider">
+                  Colors
+                </h3>
+                <div className="space-y-1 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-[#9b978e]">Main Color</span>
+                    <kbd className="bg-[#1d1d1d] px-2 py-0.5 rounded border border-[#1a1a1a]">1</kbd>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#9b978e]">Secondary Color</span>
+                    <kbd className="bg-[#1d1d1d] px-2 py-0.5 rounded border border-[#1a1a1a]">2</kbd>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#9b978e]">Background Color</span>
+                    <kbd className="bg-[#1d1d1d] px-2 py-0.5 rounded border border-[#1a1a1a]">3</kbd>
+                  </div>
+                </div>
+              </div>
+
               {/* View */}
               <div>
                 <h3 className="text-sm font-bold text-[#8aa7ff] mb-2 uppercase tracking-wider">
@@ -2441,6 +2629,10 @@ export const Canvas = ({
                   <div className="flex justify-between">
                     <span className="text-[#9b978e]">Pan Canvas</span>
                     <kbd className="bg-[#1d1d1d] px-2 py-0.5 rounded border border-[#1a1a1a]">Space+Drag</kbd>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#9b978e]">Adjust Brush Size</span>
+                    <kbd className="bg-[#1d1d1d] px-2 py-0.5 rounded border border-[#1a1a1a]">Shift+Drag</kbd>
                   </div>
                 </div>
               </div>
