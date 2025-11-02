@@ -4,49 +4,47 @@ export class WebGLRenderer {
   private gl: WebGLRenderingContext;
   private program: WebGLProgram;
   private brushProgram: WebGLProgram | null = null;
+  private selectionProgram: WebGLProgram | null = null;
   private texture: WebGLTexture;
   private framebuffer: WebGLFramebuffer;
   private textureCache: Map<string, WebGLTexture> = new Map();
   private framebufferCache: Map<string, WebGLFramebuffer> = new Map();
+  private vertexBuffer: WebGLBuffer | null = null;
+  private texCoordBuffer: WebGLBuffer | null = null;
   private lastFrameTime: number = 0;
   private targetFrameTime: number = 1000 / 60; // 60 FPS
+  private isWebGL2: boolean = false;
+  private pixelPackBuffer: WebGLBuffer | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
-    // Try WebGL2 first, then WebGL1, then experimental-webgl
+    // Try WebGL2 first for better performance and features
     let gl = canvas.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: false,
-      preserveDrawingBuffer: true,
+      preserveDrawingBuffer: false, // Changed to false for better performance
       antialias: false,
       depth: false,
       stencil: false,
-      desynchronized: true,
+      desynchronized: true, // Allows async rendering, better performance
       powerPreference: "high-performance",
-    }) as WebGLRenderingContext | null;
+      failIfMajorPerformanceCaveat: false, // Don't fail on software rendering
+    }) as WebGL2RenderingContext | null;
 
-    if (!gl) {
+    if (gl) {
+      this.isWebGL2 = true;
+    } else {
+      // Fallback to WebGL1
       gl = canvas.getContext("webgl", {
         alpha: true,
         premultipliedAlpha: false,
-        preserveDrawingBuffer: true,
+        preserveDrawingBuffer: false,
         antialias: false,
         depth: false,
         stencil: false,
         desynchronized: true,
         powerPreference: "high-performance",
-      });
-    }
-
-    if (!gl) {
-      gl = canvas.getContext("experimental-webgl", {
-        alpha: true,
-        premultipliedAlpha: false,
-        preserveDrawingBuffer: true,
-        antialias: false,
-        depth: false,
-        stencil: false,
-        powerPreference: "high-performance",
       }) as WebGLRenderingContext | null;
+
     }
 
     if (!gl) {
@@ -54,14 +52,120 @@ export class WebGLRenderer {
     }
 
     this.gl = gl;
+
+    // Log WebGL capabilities for debugging
+    console.log(`WebGL ${this.isWebGL2 ? '2' : '1'} initialized with high-performance mode`);
+    console.log(`Max texture size: ${gl.getParameter(gl.MAX_TEXTURE_SIZE)}`);
+    console.log(`Max renderbuffer size: ${gl.getParameter(gl.MAX_RENDERBUFFER_SIZE)}`);
+
     this.program = this.createShaderProgram();
     this.brushProgram = this.createBrushProgram();
+    this.selectionProgram = this.createSelectionProgram();
     this.texture = this.createTexture();
     this.framebuffer = this.createFramebuffer();
+
+    // Create reusable vertex and texCoord buffers for better performance
+    this.createReusableBuffers();
 
     // Setup viewport
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.enable(gl.BLEND);
+
+    // Enable additional optimizations for WebGL2
+    if (this.isWebGL2) {
+      const gl2 = gl as WebGL2RenderingContext;
+      // Create pixel pack buffer for async readPixels
+      this.pixelPackBuffer = gl2.createBuffer();
+    }
+  }
+
+  /**
+   * Create reusable buffers to avoid repeated buffer creation
+   * This significantly improves performance for repeated draws
+   */
+  private createReusableBuffers() {
+    const gl = this.gl;
+
+    // Reusable geometry for full-screen quad
+    const positions = new Float32Array([
+      -1, -1,  // bottom-left
+       1, -1,  // bottom-right
+      -1,  1,  // top-left
+       1,  1,  // top-right
+    ]);
+
+    const texCoords = new Float32Array([
+      0, 1,  // bottom-left
+      1, 1,  // bottom-right
+      0, 0,  // top-left
+      1, 0,  // top-right
+    ]);
+
+    this.vertexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+
+    this.texCoordBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.texCoordBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, texCoords, gl.STATIC_DRAW);
+  }
+
+  /**
+   * Create optimized selection rendering program for GPU-accelerated marching ants
+   */
+  private createSelectionProgram(): WebGLProgram {
+    const gl = this.gl;
+
+    const vertexSource = `
+      attribute vec2 a_position;
+      attribute vec2 a_texCoord;
+      varying vec2 v_texCoord;
+      void main() {
+        gl_Position = vec4(a_position, 0.0, 1.0);
+        v_texCoord = a_texCoord;
+      }
+    `;
+
+    const fragmentSource = `
+      precision mediump float;
+      varying vec2 v_texCoord;
+      uniform sampler2D u_selectionMask;
+      uniform float u_time;
+      uniform vec2 u_resolution;
+
+      void main() {
+        float mask = texture2D(u_selectionMask, v_texCoord).r;
+
+        if (mask < 0.5) {
+          discard;
+        }
+
+        // Marching ants effect
+        vec2 coord = v_texCoord * u_resolution;
+        float pattern = mod(coord.x + coord.y + u_time, 8.0);
+        float dash = step(4.0, pattern);
+
+        // Alternate black and white
+        vec3 color = mix(vec3(0.0), vec3(1.0), dash);
+        gl_FragColor = vec4(color, 0.8);
+      }
+    `;
+
+    const vertexShader = this.compileShader(gl.VERTEX_SHADER, vertexSource);
+    const fragmentShader = this.compileShader(gl.FRAGMENT_SHADER, fragmentSource);
+
+    const program = gl.createProgram();
+    if (!program) throw new Error("Failed to create selection program");
+
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error("Selection program link failed: " + gl.getProgramInfoLog(program));
+    }
+
+    return program;
   }
 
   private createBrushProgram(): WebGLProgram {
@@ -186,42 +290,37 @@ export class WebGLRenderer {
       throw new Error("Program link failed: " + gl.getProgramInfoLog(program));
     }
 
-    gl.useProgram(program);
-
-    // Setup geometry
-    const positions = new Float32Array([
-      -1, -1,  // bottom-left
-       1, -1,  // bottom-right
-      -1,  1,  // top-left
-       1,  1,  // top-right
-    ]);
-
-    const texCoords = new Float32Array([
-      0, 1,  // bottom-left
-      1, 1,  // bottom-right
-      0, 0,  // top-left
-      1, 0,  // top-right
-    ]);
-
-    // Position buffer
-    const positionBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
-
-    const positionLocation = gl.getAttribLocation(program, "a_position");
-    gl.enableVertexAttribArray(positionLocation);
-    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
-
-    // TexCoord buffer
-    const texCoordBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, texCoords, gl.STATIC_DRAW);
-
-    const texCoordLocation = gl.getAttribLocation(program, "a_texCoord");
-    gl.enableVertexAttribArray(texCoordLocation);
-    gl.vertexAttribPointer(texCoordLocation, 2, gl.FLOAT, false, 0, 0);
-
+    // Note: Buffers will be set up when this program is used
+    // Using reusable buffers for better performance
     return program;
+  }
+
+  /**
+   * Setup vertex attributes for a program using reusable buffers
+   * This avoids repeated buffer creation and improves GPU performance
+   */
+  private setupProgramAttributes(program: WebGLProgram) {
+    const gl = this.gl;
+
+    // Use reusable position buffer
+    if (this.vertexBuffer) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+      const positionLocation = gl.getAttribLocation(program, "a_position");
+      if (positionLocation >= 0) {
+        gl.enableVertexAttribArray(positionLocation);
+        gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+      }
+    }
+
+    // Use reusable texCoord buffer
+    if (this.texCoordBuffer) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.texCoordBuffer);
+      const texCoordLocation = gl.getAttribLocation(program, "a_texCoord");
+      if (texCoordLocation >= 0) {
+        gl.enableVertexAttribArray(texCoordLocation);
+        gl.vertexAttribPointer(texCoordLocation, 2, gl.FLOAT, false, 0, 0);
+      }
+    }
   }
 
   private compileShader(type: number, source: string): WebGLShader {
@@ -310,6 +409,9 @@ export class WebGLRenderer {
     const gl = this.gl;
     gl.useProgram(this.program);
 
+    // Setup vertex attributes using reusable buffers
+    this.setupProgramAttributes(this.program);
+
     // Set blend mode based on layer settings
     if (blendMode === "normal") {
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -333,7 +435,7 @@ export class WebGLRenderer {
     gl.uniform1f(gl.getUniformLocation(this.program, "u_opacity"), opacity / 100);
     gl.uniform1i(gl.getUniformLocation(this.program, "u_blendMode"), this.getBlendModeValue(blendMode));
 
-    // Draw
+    // Draw using GPU
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
@@ -371,9 +473,48 @@ export class WebGLRenderer {
     });
     this.textureCache.clear();
 
+    // Clean up framebuffers
+    this.framebufferCache.forEach((fb) => {
+      gl.deleteFramebuffer(fb);
+    });
+    this.framebufferCache.clear();
+
+    // Clean up buffers
+    if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer);
+    if (this.texCoordBuffer) gl.deleteBuffer(this.texCoordBuffer);
+    if (this.pixelPackBuffer) gl.deleteBuffer(this.pixelPackBuffer);
+
+    // Clean up programs
     gl.deleteTexture(this.texture);
     gl.deleteFramebuffer(this.framebuffer);
     gl.deleteProgram(this.program);
+    if (this.brushProgram) gl.deleteProgram(this.brushProgram);
+    if (this.selectionProgram) gl.deleteProgram(this.selectionProgram);
+  }
+
+  /**
+   * Get GPU performance information
+   * Useful for debugging and monitoring GPU usage
+   */
+  public getPerformanceInfo(): {
+    isWebGL2: boolean;
+    renderer: string;
+    vendor: string;
+    maxTextureSize: number;
+    textureCount: number;
+    framebufferCount: number;
+  } {
+    const gl = this.gl;
+    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+
+    return {
+      isWebGL2: this.isWebGL2,
+      renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : 'Unknown',
+      vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : 'Unknown',
+      maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+      textureCount: this.textureCache.size,
+      framebufferCount: this.framebufferCache.size,
+    };
   }
 
   public clearTextureCache(layerId?: string) {
