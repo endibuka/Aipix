@@ -1,7 +1,7 @@
 // Prevents additional console window on Windows in release builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use aipix_lib::{database, engine, AppState};
+use aipix_lib::{database, engine, commands, AppState};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{Manager, State};
@@ -698,6 +698,7 @@ fn main() {
             selections: Mutex::new(HashMap::new()),
             clipboard: Mutex::new(None),
         })
+        .manage(commands::RendererState::new())
         .invoke_handler(tauri::generate_handler![
             greet,
             init_database,
@@ -742,6 +743,16 @@ fn main() {
             cut_selection,
             paste_selection,
             delete_selected,
+            // Native Skia rendering commands
+            commands::rendering::init_renderer,
+            commands::rendering::draw_stroke,
+            commands::rendering::fill_rect,
+            commands::rendering::render_viewport,
+            commands::rendering::get_canvas_image,
+            commands::rendering::clear_canvas,
+            commands::rendering::resize_canvas,
+            commands::rendering::get_dirty_bounds,
+            commands::rendering::clear_dirty_region,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]

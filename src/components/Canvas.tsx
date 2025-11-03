@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ColorPicker } from "./ColorPicker";
 import { LayerPanel, Layer, BlendMode } from "./LayerPanel";
-import { WebGLRenderer, RAFBatchProcessor } from "../utils/webglRenderer";
+import { NativeSkiaRenderer } from "../utils/nativeRenderer";
 import { SelectionOverlay } from "./SelectionOverlay";
 
 interface SelectionBounds {
@@ -55,16 +55,14 @@ export const Canvas = ({
 }: CanvasProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
-  const webglRendererRef = useRef<WebGLRenderer | null>(null);
-  const rafProcessorRef = useRef<RAFBatchProcessor>(new RAFBatchProcessor());
+  const nativeRendererRef = useRef<NativeSkiaRenderer | null>(null);
   const renderLoopRef = useRef<number | null>(null);
   const needsRenderRef = useRef<boolean>(false);
+  const drawOperationCountRef = useRef<number>(0);
   const lastThumbnailUpdateRef = useRef<number>(0);
   const thumbnailUpdateIntervalRef = useRef<number>(500); // Update thumbnails max once per 500ms
-  const drawOperationCountRef = useRef<number>(0);
   const dirtyLayersRef = useRef<Set<string>>(new Set());
-  const layerTexturesRef = useRef<Map<string, WebGLTexture>>(new Map());
-  const gpuDrawnLayersRef = useRef<Set<string>>(new Set()); // Track layers drawn with GPU
+  const thumbnailCanvasPoolRef = useRef<HTMLCanvasElement | null>(null);
 
   // 3-color system with slots
   const [mainColor, setMainColor] = useState("#000000");
@@ -249,22 +247,29 @@ export const Canvas = ({
     setLayers((prev) => [...prev, newLayer]);
     setActiveLayerId(newLayer.id);
 
-    // Initialize GPU texture for new layer
-    const renderer = webglRendererRef.current;
-    if (renderer) {
-      renderer.initializeLayerTexture(newLayer.id, width, height);
-    }
-
-    // Create canvas for new layer (still needed for some tools and fallback)
+    // Create canvas for new layer (for backward compatibility with existing tools)
     const layerCanvas = document.createElement("canvas");
     layerCanvas.width = width;
     layerCanvas.height = height;
     layerCanvasesRef.current.set(newLayer.id, layerCanvas);
-    dirtyLayersRef.current.add(newLayer.id); // Mark as dirty for initial texture upload
+    dirtyLayersRef.current.add(newLayer.id); // Mark as dirty
   }, [layers, width, height]);
 
   const handleLayerDelete = useCallback((layerId: string) => {
     if (layers.length <= 1) return;
+
+    // MEMORY FIX: Properly clean up canvas resources to prevent memory leaks
+    const layerCanvas = layerCanvasesRef.current.get(layerId);
+    if (layerCanvas) {
+      // Clear canvas context and free memory
+      const ctx = layerCanvas.getContext("2d");
+      if (ctx) {
+        ctx.clearRect(0, 0, layerCanvas.width, layerCanvas.height);
+      }
+      // Resize to 0 to free memory
+      layerCanvas.width = 0;
+      layerCanvas.height = 0;
+    }
 
     setLayers((prev) => {
       const filtered = prev.filter((l) => l.id !== layerId);
@@ -275,11 +280,9 @@ export const Canvas = ({
       return filtered;
     });
 
-    // Clean up layer canvas
+    // Clean up layer canvas and all references
     layerCanvasesRef.current.delete(layerId);
-    layerTexturesRef.current.delete(layerId);
     dirtyLayersRef.current.delete(layerId);
-    webglRendererRef.current?.clearTextureCache(layerId);
   }, [layers, activeLayerId]);
 
   const handleLayerDuplicate = useCallback((layerId: string) => {
@@ -303,15 +306,6 @@ export const Canvas = ({
         ctx.drawImage(sourceCanvas, 0, 0);
       }
       layerCanvasesRef.current.set(newLayer.id, newCanvas);
-
-      // Initialize GPU texture with duplicated content
-      const renderer = webglRendererRef.current;
-      if (renderer) {
-        const imageData = ctx?.getImageData(0, 0, width, height);
-        if (imageData) {
-          renderer.uploadTexture(imageData.data, width, height, newLayer.id);
-        }
-      }
     }
 
     setLayers((prev) => [...prev, newLayer]);
@@ -356,23 +350,41 @@ export const Canvas = ({
   useEffect(() => {
     const initCanvas = async () => {
       try {
+        console.log("🎨 Initializing canvas...", { projectId, width, height });
+
         // Create canvas buffer in Rust
         await invoke("create_canvas", {
           projectId,
           width,
           height,
         });
+        console.log("✅ Rust canvas buffer created");
 
-        // Initialize WebGL renderer
-        if (canvasRef.current && !webglRendererRef.current) {
+        // Initialize Native Skia renderer
+        if (!nativeRendererRef.current) {
           try {
-            webglRendererRef.current = new WebGLRenderer(canvasRef.current);
+            const rendererInitStart = performance.now();
+            console.log(`🚀 Initializing Native Skia renderer for ${width}x${height} canvas...`);
+
+            const renderer = new NativeSkiaRenderer(width, height);
+            await renderer.init();
+            nativeRendererRef.current = renderer;
+
+            const rendererInitTime = performance.now() - rendererInitStart;
+            const canvasSize = width * height;
+            const canvasMB = (canvasSize * 4) / (1024 * 1024); // RGBA = 4 bytes per pixel
+
+            console.log(`✅ Native Skia renderer initialized in ${rendererInitTime.toFixed(2)}ms`);
+            console.log(`📊 Canvas size: ${width}x${height} (${(canvasSize / 1000000).toFixed(2)}MP, ${canvasMB.toFixed(2)}MB)`);
+            console.log(`🎯 Large canvas mode: ${canvasSize >= 2000 * 2000 ? 'ENABLED' : 'DISABLED'} (threshold: 4MP)`);
           } catch (error) {
-            console.warn("WebGL not available, falling back to 2D context:", error);
+            console.error("❌ Failed to initialize native renderer:", error);
+            console.warn("⚠️ Falling back to Canvas 2D (performance will be degraded)");
           }
         }
 
-        // Start continuous render loop for smooth, throttled rendering at 60 FPS
+        // Start render loop for smooth rendering
+        console.log("🔄 Starting render loop...");
         const startRenderLoop = () => {
           const render = () => {
             // Only render if something changed
@@ -385,23 +397,20 @@ export const Canvas = ({
           renderLoopRef.current = requestAnimationFrame(render);
         };
         startRenderLoop();
+        console.log("✅ Render loop started");
 
-        // Create canvas for initial layer
+        // Create canvas for initial layer (for backward compatibility with existing tools)
         const initialCanvas = document.createElement("canvas");
         initialCanvas.width = width;
         initialCanvas.height = height;
         layerCanvasesRef.current.set("layer-1", initialCanvas);
 
-        // Initialize GPU texture for initial layer
-        const renderer = webglRendererRef.current;
-        if (renderer) {
-          renderer.initializeLayerTexture("layer-1", width, height);
-        }
-
-        dirtyLayersRef.current.add("layer-1"); // Mark as dirty for initial upload
+        dirtyLayersRef.current.add("layer-1"); // Mark as dirty
 
         // Get canvas data and render
+        console.log("🖼️ Rendering initial canvas...");
         await renderCanvas();
+        console.log("✅ Initial canvas rendered");
 
         // Initialize selection
         await invoke("create_selection", {
@@ -409,11 +418,15 @@ export const Canvas = ({
           width,
           height,
         });
+        console.log("✅ Selection initialized");
+
+        console.log("🎉 Canvas initialization complete!");
       } catch (error) {
-        console.error("Failed to initialize canvas:", error);
+        console.error("❌ Failed to initialize canvas:", error);
       }
     };
 
+    console.log("📦 Starting canvas initialization...");
     initCanvas();
 
     // Create preview canvas for line/rectangle tools
@@ -422,16 +435,43 @@ export const Canvas = ({
     preview.height = height;
     setPreviewCanvas(preview);
 
-    // Cleanup on unmount
+    // MEMORY OPTIMIZATION: Comprehensive cleanup on unmount
     return () => {
+      // Stop render loop
       if (renderLoopRef.current) {
         cancelAnimationFrame(renderLoopRef.current);
+        renderLoopRef.current = null;
       }
-      webglRendererRef.current?.dispose();
-      rafProcessorRef.current?.clear();
+
+      // Clean up native renderer
+      nativeRendererRef.current = null;
+
+      // Clear flush timer
       if (flushTimerRef.current) {
         clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
       }
+
+      // Clean up all layer canvases
+      layerCanvasesRef.current.forEach((canvas) => {
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+        canvas.width = 0;
+        canvas.height = 0;
+      });
+      layerCanvasesRef.current.clear();
+
+      // Clean up thumbnail canvas pool
+      if (thumbnailCanvasPoolRef.current) {
+        thumbnailCanvasPoolRef.current.width = 0;
+        thumbnailCanvasPoolRef.current.height = 0;
+        thumbnailCanvasPoolRef.current = null;
+      }
+
+      // Clear all tracking references
+      dirtyLayersRef.current.clear();
     };
   }, [projectId, width, height]);
 
@@ -460,9 +500,10 @@ export const Canvas = ({
       // Always render immediately when not drawing
       needsRenderRef.current = true;
     } else {
-      // During drawing, only schedule render every few operations
+      // During drawing, throttle renders more aggressively for better performance
       drawOperationCountRef.current++;
-      if (drawOperationCountRef.current % 3 === 0) {
+      // Only render every 10 operations during drawing (was 3, now 10 for better performance)
+      if (drawOperationCountRef.current % 10 === 0) {
         needsRenderRef.current = true;
       }
     }
@@ -494,73 +535,11 @@ export const Canvas = ({
     }
   };
 
-  // Composite all visible layers using WebGL or fallback to 2D
+  // Composite all visible layers using Canvas 2D
   const compositeLayersWebGL = async () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const renderer = webglRendererRef.current;
-
-    // Fallback to 2D if WebGL not available
-    if (!renderer) {
-      compositeLayers2D();
-      return;
-    }
-
-    try {
-      // Clear canvas
-      renderer.clear(0, 0, 0, 0);
-
-      let previousTexture: WebGLTexture | undefined;
-
-      // Render layers from bottom to top
-      for (const layer of layers) {
-        if (!layer.visible) continue;
-
-        const layerCanvas = layerCanvasesRef.current.get(layer.id);
-        if (!layerCanvas) continue;
-
-        // Check if layer texture needs updating
-        let texture = layerTexturesRef.current.get(layer.id);
-        const isDirty = dirtyLayersRef.current.has(layer.id);
-        const isGpuDrawn = gpuDrawnLayersRef.current.has(layer.id);
-
-        if (!texture || (isDirty && !isGpuDrawn)) {
-          // Only read pixel data if layer is dirty AND not GPU-drawn
-          // GPU-drawn layers already have their texture updated on GPU
-          const ctx = layerCanvas.getContext("2d", { willReadFrequently: true });
-          if (!ctx) continue;
-
-          const imageData = ctx.getImageData(0, 0, width, height);
-          texture = renderer.uploadTexture(imageData.data, width, height, layer.id);
-          layerTexturesRef.current.set(layer.id, texture);
-
-          // Clear dirty flag
-          dirtyLayersRef.current.delete(layer.id);
-        } else if (texture && isDirty && isGpuDrawn) {
-          // GPU-drawn layer - texture already updated, just clear dirty flag
-          dirtyLayersRef.current.delete(layer.id);
-        }
-
-        // Skip if no texture
-        if (!texture) continue;
-
-        renderer.renderLayer(
-          texture,
-          layer.opacity,
-          layer.blendMode,
-          previousTexture
-        );
-
-        previousTexture = texture;
-      }
-
-      // Generate thumbnails for visible layers
-      updateLayerThumbnails();
-    } catch (error) {
-      console.error("WebGL composite failed, falling back to 2D:", error);
-      compositeLayers2D();
-    }
+    // 🎯 USE CANVAS 2D FOR DISPLAY: Maintains layer system, transparency, and checkered background
+    // Skia backend is NOT used for display - it was causing 900ms+ delays!
+    compositeLayers2D();
   };
 
   // Fallback 2D compositing
@@ -602,7 +581,7 @@ export const Canvas = ({
     updateLayerThumbnails();
   };
 
-  // Update layer thumbnails (throttled to prevent excessive re-renders)
+  // MEMORY OPTIMIZATION: Update layer thumbnails (throttled and using reusable canvas)
   const updateLayerThumbnails = () => {
     const now = Date.now();
     const timeSinceLastUpdate = now - lastThumbnailUpdateRef.current;
@@ -614,19 +593,26 @@ export const Canvas = ({
 
     lastThumbnailUpdateRef.current = now;
 
+    // MEMORY FIX: Reuse single thumbnail canvas instead of creating new ones
+    if (!thumbnailCanvasPoolRef.current) {
+      thumbnailCanvasPoolRef.current = document.createElement("canvas");
+      thumbnailCanvasPoolRef.current.width = 32;
+      thumbnailCanvasPoolRef.current.height = 32;
+    }
+
+    const thumbCanvas = thumbnailCanvasPoolRef.current;
+    const thumbCtx = thumbCanvas.getContext("2d", { willReadFrequently: false });
+    if (!thumbCtx) return;
+
+    thumbCtx.imageSmoothingEnabled = false;
+
     setLayers((prev) =>
       prev.map((layer) => {
         const layerCanvas = layerCanvasesRef.current.get(layer.id);
         if (!layerCanvas) return layer;
 
-        // Create thumbnail (32x32)
-        const thumbCanvas = document.createElement("canvas");
-        thumbCanvas.width = 32;
-        thumbCanvas.height = 32;
-        const thumbCtx = thumbCanvas.getContext("2d");
-        if (!thumbCtx) return layer;
-
-        thumbCtx.imageSmoothingEnabled = false;
+        // Clear and reuse the same canvas
+        thumbCtx.clearRect(0, 0, 32, 32);
         thumbCtx.drawImage(layerCanvas, 0, 0, width, height, 0, 0, 32, 32);
 
         return {
@@ -995,6 +981,11 @@ export const Canvas = ({
     drawOperationCountRef.current = 0; // Reset counter
     needsRenderRef.current = true; // Force final render
 
+    // Force final render when drawing ends
+    if (selectedTool === "pencil" || selectedTool === "eraser") {
+      scheduleRender(true);  // Immediate final render
+    }
+
     const coords = getCanvasCoordinates(e);
     if (!coords) return;
 
@@ -1131,12 +1122,6 @@ export const Canvas = ({
     return rgb;
   };
 
-  // Convert hex color to RGBA string format for GPU rendering
-  const hexToRgba = (hex: string, opacity: number = 1): string => {
-    const rgb = hexToRgb(hex);
-    return `rgba(${rgb.r},${rgb.g},${rgb.b},${opacity})`;
-  };
-
   const getDitheringValue = (x: number, y: number, pattern: DitheringPattern): boolean => {
     switch (pattern) {
       case "checkerboard":
@@ -1186,9 +1171,7 @@ export const Canvas = ({
   };
 
   const drawPixelImmediate = (x: number, y: number) => {
-    const renderer = webglRendererRef.current;
-
-    // Helper function to draw a single pixel or brush stroke (GPU-accelerated)
+    // Helper function to draw a single pixel or brush stroke
     const drawBrush = (centerX: number, centerY: number) => {
       const offset = Math.floor(brushSize / 2);
       const startX = Math.max(0, centerX - offset);
@@ -1202,57 +1185,25 @@ export const Canvas = ({
       if (brushWidth <= 0 || brushHeight <= 0) return;
 
       if (selectedTool === "pencil") {
-        // Try GPU-accelerated drawing first, fallback to CPU
-        if (renderer) {
-          const rgbaColor = hexToRgba(selectedColor, colorOpacity / 100);
-          renderer.drawBrushToLayer(
-            activeLayerId,
-            startX,
-            startY,
-            brushWidth,
-            brushHeight,
-            rgbaColor,
-            width,
-            height
-          );
-          gpuDrawnLayersRef.current.add(activeLayerId);
-        } else {
-          // Fallback to CPU canvas drawing when WebGL not available
-          const layerCanvas = layerCanvasesRef.current.get(activeLayerId);
-          if (layerCanvas) {
-            const ctx = layerCanvas.getContext("2d");
-            if (ctx) {
-              ctx.fillStyle = selectedColor;
-              ctx.globalAlpha = colorOpacity / 100;
-              ctx.fillRect(startX, startY, brushWidth, brushHeight);
-              ctx.globalAlpha = 1.0;
-              gpuDrawnLayersRef.current.delete(activeLayerId);
-            }
+        // ULTRA OPTIMIZED: Use fillStyle + globalCompositeOperation for maximum speed
+        const layerCanvas = layerCanvasesRef.current.get(activeLayerId);
+        if (layerCanvas) {
+          const ctx = layerCanvas.getContext("2d");
+          if (ctx) {
+            // This is the fastest way - let the browser's native rendering handle it
+            ctx.fillStyle = selectedColor;
+            ctx.globalAlpha = colorOpacity / 100;
+            ctx.fillRect(startX, startY, brushWidth, brushHeight);
+            ctx.globalAlpha = 1.0;
           }
         }
       } else if (selectedTool === "eraser") {
-        // Try GPU-accelerated eraser first, fallback to CPU
-        if (renderer) {
-          renderer.drawBrushToLayer(
-            activeLayerId,
-            startX,
-            startY,
-            brushWidth,
-            brushHeight,
-            "rgba(0,0,0,0)", // Transparent
-            width,
-            height
-          );
-          gpuDrawnLayersRef.current.add(activeLayerId);
-        } else {
-          // Fallback to CPU canvas eraser when WebGL not available
-          const layerCanvas = layerCanvasesRef.current.get(activeLayerId);
-          if (layerCanvas) {
-            const ctx = layerCanvas.getContext("2d");
-            if (ctx) {
-              ctx.clearRect(startX, startY, brushWidth, brushHeight);
-              gpuDrawnLayersRef.current.delete(activeLayerId);
-            }
+        // OPTIMIZED: Direct pixel clearing
+        const layerCanvas = layerCanvasesRef.current.get(activeLayerId);
+        if (layerCanvas) {
+          const ctx = layerCanvas.getContext("2d");
+          if (ctx) {
+            ctx.clearRect(startX, startY, brushWidth, brushHeight);
           }
         }
       } else if (selectedTool === "dithering") {
@@ -1261,9 +1212,6 @@ export const Canvas = ({
         if (!layerCanvas) return;
         const ctx = layerCanvas.getContext("2d");
         if (!ctx) return;
-
-        // Remove from GPU-drawn set since we're using CPU
-        gpuDrawnLayersRef.current.delete(activeLayerId);
 
         // Dithering: Optimized using ImageData for large brushes
         if (brushWidth * brushHeight > 16) {
@@ -1496,7 +1444,69 @@ export const Canvas = ({
       return;
     }
 
-    // Interpolate between last position and current for smooth lines using Bresenham-like algorithm
+    // 🚀 OPTIMIZED DIRECT CANVAS 2D DRAWING - Fast and maintains layer system
+    if (selectedTool === "pencil" || selectedTool === "eraser") {
+      // Get the active layer canvas
+      const layerCanvas = layerCanvasesRef.current.get(activeLayerId);
+      if (!layerCanvas) {
+        console.warn(`[DRAW] Active layer ${activeLayerId} not found`);
+        return;
+      }
+
+      const ctx = layerCanvas.getContext("2d", { willReadFrequently: false });
+      if (!ctx) return;
+
+      // INTELLIGENT POINT REDUCTION: Skip redundant points for smoother, faster strokes
+      if (lastPosRef.current) {
+        const last = lastPosRef.current;
+
+        if (last.x >= 0 && last.x < width && last.y >= 0 && last.y < height) {
+          const dx = Math.abs(x - last.x);
+          const dy = Math.abs(y - last.y);
+          const distance = Math.max(dx, dy);
+
+          // 🎯 ADAPTIVE STEP SIZE: Larger brushes = fewer points needed
+          // For large brushes, this reduces points by 90%+
+          const stepSize = Math.max(1, Math.floor(brushSize / 2));
+
+          if (distance <= stepSize) {
+            // Points are very close, just draw current
+            drawPixelImmediate(x, y);
+          } else {
+            // Interpolate with intelligent stepping to maintain smooth strokes
+            const steps = Math.max(2, Math.ceil(distance / stepSize));
+            for (let i = 0; i <= steps; i++) {
+              const t = i / steps;
+              const interpX = Math.round(last.x + (x - last.x) * t);
+              const interpY = Math.round(last.y + (y - last.y) * t);
+
+              if (interpX >= 0 && interpX < width && interpY >= 0 && interpY < height) {
+                drawPixelImmediate(interpX, interpY);
+              }
+            }
+          }
+        } else {
+          // Last position was out of bounds, just draw current
+          drawPixelImmediate(x, y);
+        }
+      } else {
+        // First point in stroke
+        drawPixelImmediate(x, y);
+      }
+
+      lastPosRef.current = { x, y };
+
+      // Mark layer as dirty
+      dirtyLayersRef.current.add(activeLayerId);
+
+      // Schedule render (throttled during drawing)
+      scheduleRender();
+
+      return;
+    }
+
+    // 🔧 FALLBACK: For other tools (dithering, color replace), use Canvas 2D
+    // OPTIMIZED: Intelligent interpolation - skip points based on brush size for speed
     if (lastPosRef.current) {
       const last = lastPosRef.current;
 
@@ -1504,37 +1514,28 @@ export const Canvas = ({
       if (last.x >= 0 && last.x < width && last.y >= 0 && last.y < height) {
         const dx = Math.abs(x - last.x);
         const dy = Math.abs(y - last.y);
-        const sx = last.x < x ? 1 : -1;
-        const sy = last.y < y ? 1 : -1;
-        let err = dx - dy;
+        const distance = Math.max(dx, dy);
 
-        let currentX = last.x;
-        let currentY = last.y;
+        // PERFORMANCE KEY: Skip interpolation points based on brush size
+        // For large brushes, we don't need to draw every single pixel
+        const stepSize = Math.max(1, Math.floor(brushSize / 3));
 
-        // Bresenham's line algorithm for accurate pixel traversal
-        while (true) {
-          // Draw current pixel if in bounds
-          if (currentX >= 0 && currentX < width && currentY >= 0 && currentY < height) {
-            drawPixelImmediate(currentX, currentY);
-            drawBatchRef.current.push({ x: currentX, y: currentY });
-          }
+        if (distance <= stepSize) {
+          // Points are close, just draw current
+          drawPixelImmediate(x, y);
+          drawBatchRef.current.push({ x, y });
+        } else {
+          // Interpolate with intelligent stepping
+          const steps = Math.ceil(distance / stepSize);
+          for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            const interpX = Math.round(last.x + (x - last.x) * t);
+            const interpY = Math.round(last.y + (y - last.y) * t);
 
-          // Check if we've reached the end point
-          if (currentX === x && currentY === y) break;
-
-          const e2 = 2 * err;
-          if (e2 > -dy) {
-            err -= dy;
-            currentX += sx;
-          }
-          if (e2 < dx) {
-            err += dx;
-            currentY += sy;
-          }
-
-          // Safety check to prevent infinite loops
-          if (Math.abs(currentX - last.x) > width || Math.abs(currentY - last.y) > height) {
-            break;
+            if (interpX >= 0 && interpX < width && interpY >= 0 && interpY < height) {
+              drawPixelImmediate(interpX, interpY);
+              drawBatchRef.current.push({ x: interpX, y: interpY });
+            }
           }
         }
       } else {
@@ -1551,9 +1552,8 @@ export const Canvas = ({
     lastPosRef.current = { x, y };
 
     // Schedule batch flush using RAF for optimal performance
-    // Mark that we need a render after flushing
-    rafProcessorRef.current.addToBatch(async () => {
-      await flushDrawBatch();
+    // Flush draw batch and schedule render
+    flushDrawBatch().then(() => {
       scheduleRender();
     });
   };
@@ -2002,7 +2002,6 @@ export const Canvas = ({
     const handleGlobalMouseUp = async () => {
       if (isDrawing) {
         // Flush any pending draws using RAF
-        rafProcessorRef.current.flush();
         await flushDrawBatch();
 
         // End drawing state
@@ -3072,7 +3071,6 @@ export const Canvas = ({
 
                 // Keep drawing state active, only flush pending operations
                 if (isDrawing && (selectedTool === "pencil" || selectedTool === "eraser")) {
-                  rafProcessorRef.current.flush();
                   flushDrawBatch();
                 }
               }}

@@ -27,5 +27,11 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 anyhow = "1.0"
 thiserror = "2.0"
 
+# Native rendering with Skia (like Aseprite)
+skia-safe = { version = "0.78", features = ["textlayout"] }
+parking_lot = "0.12"
+rayon = "1.10"
+bytemuck = "1.14"
+
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-opener = "2.0"

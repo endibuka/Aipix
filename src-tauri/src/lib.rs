@@ -2,6 +2,7 @@
 pub mod database;
 pub mod engine;
 pub mod fileio;
+pub mod commands;  // Tauri commands
 
 use std::sync::Mutex;
 use std::collections::HashMap;
